@@ -13,7 +13,7 @@ export default defineConfig(() => {
  			entrypoint: "build/index.js",
  			env: {
 				auth: bindings.d1({
- 					name: "auth-worker",
+ 					name: "auth",
  					id: process.env.D1_DATABASE_ID,
 				}),
  			},
