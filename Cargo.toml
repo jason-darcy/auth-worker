@@ -7,6 +7,11 @@ authors = ["Jason Darcy <notnone@homeryland.com>"]
 [lib]
 crate-type = ["cdylib"]
 
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+
 [dependencies]
 worker = { version = "0.9", features = ['http', 'axum', 'd1'] }
 worker-macros = { version = "0.9", features = ['http'] }
