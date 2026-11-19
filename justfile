@@ -2,18 +2,16 @@ wrangler-dev:
     wrangler dev --config wrangler.local.toml
 
 cf-dev:
-    cf dev --mode dev
+    cf dev
 
 wrangler-deploy:
-    wrangler deploy --config wrangler.prod.toml
+    wrangler deploy --config wrangler.local.toml
 
 cf-deploy:
-    cf deploy --mode production
+    cf deploy
 
-wrangler-migrate:
-    rm -rf .wrangler/state/v3/d1
-    wrangler d1 migrations apply dev-auth --local
+wrangler-migrate mode:
+    wrangler d1 migrations apply auth-worker --{{mode}}
 
-cf-migrate:
-    rm -rf .wrangler/state/v3/d1
-    cf d1 migrations apply dev-auth -m local
+cf-migrate mode:
+    cf d1 migrations apply auth-worker --{{mode}}

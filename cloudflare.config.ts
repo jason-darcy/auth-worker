@@ -5,18 +5,18 @@ import { bindings, defineConfig } from "cf/config";
  * @see https://developers.cloudflare.com/workers/wrangler/environments/
  */
 
-export default defineConfig((ctx) => {
-	return {
+export default defineConfig(() => {
+ 	return {
 		worker: {
-			name: "auth",
-			compatibilityDate: "2026-11-18",
-			entrypoint: "build/index.js",
-			env: {
+ 			name: "auth-worker",
+ 			compatibilityDate: "2026-11-18",
+ 			entrypoint: "build/index.js",
+ 			env: {
 				auth: bindings.d1({
-					name: "prod-auth",
-					id: process.env.PROD_D1_DATABASE_ID,
+ 					name: "auth-worker",
+ 					id: process.env.D1_DATABASE_ID,
 				}),
-			},
+ 			},
 		},
-	};
+ 	};
 });

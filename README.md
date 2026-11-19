@@ -13,29 +13,29 @@ You can choose cloudflare-cf cli (new cli, recommended) or wrangler cli (old cli
 for cf cli users (recommended)
 
 ```sh
-cp .env.dev.example .env.dev
+cp .env.example .env
 ```
 
 for wrangler cli users
 
 ```sh
-cp wrangler.dev.toml.example wrangler.dev.toml
+cp wrangler.toml wrangler.local.toml
 ```
 
-Run the following commands to fill in the blank in your config files (.env.dev or wrangler.dev.toml)
+Run the following commands to fill in the blank in your config files (.env or wrangler.local.toml)
 
 for cf cli users (recommended)
 
 ```sh
-cf d1 create dev-auth
-cf d1 migrations apply dev-auth -m local
+cf d1 create --name auth-worker
+cf d1 migrations apply <DATABASE_ID> --local
 ```
 
 for wrangler cli users
 
 ```sh
-wrangler d1 create dev-auth
-wrangler d1 migrations apply dev-auth --local
+wrangler d1 create auth-worker
+wrangler d1 migrations apply auth-worker --local
 ```
 
 Run the project
@@ -57,29 +57,13 @@ just wrangler-dev
 for cf cli users (recommended)
 
 ```sh
-cp .env.prod.example .env.prod
+cf d1 migrations apply auth-worker
 ```
 
 for wrangler cli users
 
 ```sh
-cp wrangler.prod.toml.example wrangler.prod.toml
-```
-
-Run the following commands to fill in the blank in your config files (.env.prod or wrangler.prod.toml)
-
-for cf cli users (recommended)
-
-```sh
-cf d1 create prod-auth
-cf d1 migrations apply prod-auth -m production
-```
-
-for wrangler cli users
-
-```sh
-wrangler d1 create prod-auth
-wrangler d1 migrations apply prod-auth --remote
+wrangler d1 migrations apply auth-worker --remote
 ```
 
 Deploy the project
