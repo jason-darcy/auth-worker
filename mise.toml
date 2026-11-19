@@ -1,2 +1,5 @@
 [tools]
-"rust" = "nightly"
+"rust" = "nightly-2026-11-18"
+"cloudflare-cf" = "1.0.0-rc.1"
+"wrangler" = "4.164.0"
+"cargo:just" = "1.59.0"
