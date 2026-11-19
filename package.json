@@ -1,5 +1,5 @@
 {
-  "name": "auth",
+  "name": "auth-worker",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -8,7 +8,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
@@ -19,6 +19,7 @@
   "packageManager": "pnpm@12.21.0",
   "type": "module",
   "devDependencies": {
+    "@types/node": "^26.6.6",
     "cf": "1.0.0-rc.1",
     "wrangler": "^4.164.0"
   }

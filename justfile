@@ -1,16 +1,19 @@
-dev:
-    wrangler dev
+wrangler-dev:
+    wrangler dev --config wrangler.local.toml
 
-deploy:
-    wrangler deploy --env production
+cf-dev:
+    cf dev --mode dev
 
-db:
-    wrangler d1 create dev-auth
-    wrangler d1 create pro-auth
+wrangler-deploy:
+    wrangler deploy --config wrangler.prod.toml
 
-create-migrations:
-    wrangler d1 migrations create dev-auth create_user_table -y
+cf-deploy:
+    cf deploy --mode production
 
-migrate:
+wrangler-migrate:
     rm -rf .wrangler/state/v3/d1
     wrangler d1 migrations apply dev-auth --local
+
+cf-migrate:
+    rm -rf .wrangler/state/v3/d1
+    cf d1 migrations apply dev-auth -m local

@@ -1,5 +1,5 @@
 [package]
-name = "auth"
+name = "auth-worker"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jason Darcy <notnone@homeryland.com>"]
@@ -9,7 +9,6 @@ crate-type = ["cdylib"]
 
 [profile.release]
 lto = true
-strip = true
 codegen-units = 1
 
 [dependencies]

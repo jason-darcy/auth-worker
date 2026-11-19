@@ -1,4 +1,4 @@
-name = "auth"
+name = "auth-worker"
 main = "build/index.js"
 compatibility_date = "2026-11-18"
 
@@ -8,9 +8,9 @@ command = "cargo install -q \"worker-build@^0.9\" && worker-build --release --pa
 [[d1_databases]]
 binding = "auth"
 database_name = "dev-auth"
-database_id = "c26383b6-13c1-4784-abc9-f29444bca594"
+database_id = ""
 
 [[env.production.d1_databases]]
 binding = "auth"
 database_name = "prod-auth"
-database_id = "fe4e07bc-39ed-436d-b9e2-0c09a2e5d8a2"
+database_id = ""
