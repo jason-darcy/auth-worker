@@ -7,10 +7,5 @@ command = "cargo install -q \"worker-build@^0.9\" && worker-build --release --pa
 
 [[d1_databases]]
 binding = "auth"
-database_name = "dev-auth"
-database_id = ""
-
-[[env.production.d1_databases]]
-binding = "auth"
 database_name = "prod-auth"
 database_id = ""
