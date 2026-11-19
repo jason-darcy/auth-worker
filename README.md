@@ -10,12 +10,6 @@ You can choose cloudflare-cf cli (new cli, recommended) or wrangler cli (old cli
 
 ## Local development
 
-for cf cli users (recommended)
-
-```sh
-cp .env.example .env
-```
-
 for wrangler cli users
 
 ```sh

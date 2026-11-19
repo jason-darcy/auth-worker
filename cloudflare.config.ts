@@ -14,7 +14,6 @@ export default defineConfig(() => {
  			env: {
 				auth: bindings.d1({
  					name: "auth",
- 					id: process.env.D1_DATABASE_ID,
 				}),
  			},
 		},
