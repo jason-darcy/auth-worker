@@ -1,10 +1,10 @@
-# Auth API by workers-rs
+# Auth API with workers-rs
 
 A self-hosted auth api for your products.
 
 The best way to deploy on your cloudflare woker is clicking the button.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.com/?url=https://github.com/jason-darcy/auth-worker)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jason-darcy/auth-worker)
 
 You can choose cloudflare-cf cli (new cli, recommended) or wrangler cli (old cli) for local development and local deploy.
 
