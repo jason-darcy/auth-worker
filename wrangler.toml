@@ -6,7 +6,7 @@ compatibility_date = "2026-11-18"
 command = "cargo install -q \"worker-build@^0.9\" && worker-build --release --panic-unwind"
 
 [[d1_databases]]
-binding = "auth"
+binding = "auth-worker"
 database_name = "auth-worker"
 database_id = ""
 migrations_dir = "migrations"

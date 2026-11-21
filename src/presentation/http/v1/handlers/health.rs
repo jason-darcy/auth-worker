@@ -1,3 +1,10 @@
-pub async fn health_handler() -> &'static str {
-    "Hello"
+use crate::presentation::http::{error::ApiResult, response::ApiResponse};
+
+pub async fn health_handler() -> ApiResult<ApiResponse<Vec<String>, Vec<String>, Vec<String>>> {
+    Ok(ApiResponse::ok(
+        200,
+        vec!["service is running".to_owned()],
+        Vec::new(),
+        Vec::new(),
+    ))
 }

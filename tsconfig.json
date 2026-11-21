@@ -6,7 +6,8 @@
     "strict": true,
     "types": [
       "node"
-    ]
+    ],
+    "skipLibCheck": true
   },
   "include": [
     "cloudflare.config.ts"

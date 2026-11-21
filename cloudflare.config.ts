@@ -5,17 +5,22 @@ import { bindings, defineConfig } from "cf/config";
  * @see https://developers.cloudflare.com/workers/wrangler/environments/
  */
 
+const domain = process.env.DOMAIN?.trim();
+const dbUuid = process.env.DB_UUID?.trim();
+
 export default defineConfig(() => {
- 	return {
-		worker: {
- 			name: "auth-worker",
- 			compatibilityDate: "2026-11-18",
- 			entrypoint: "build/index.js",
- 			env: {
-				auth: bindings.d1({
- 					name: "auth",
-				}),
- 			},
-		},
- 	};
+  return {
+    worker: {
+      name: "auth-worker",
+      compatibilityDate: "2026-11-18",
+      entrypoint: "build/index.js",
+      ...(domain ? { domains: [domain] } : {}),
+      env: {
+        "auth-worker": bindings.d1({
+          name: "auth-worker",
+          ...(dbUuid ? { id: dbUuid } : {}),
+        }),
+      },
+    },
+  };
 });
