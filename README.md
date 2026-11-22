@@ -6,7 +6,7 @@ The best way to deploy on your cloudflare woker is clicking the button.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jason-darcy/auth-worker)
 
-## Configuration
+## Configuration (Only when you want to develop or deploy locally)
 
 ```sh
 mise bootstrap
