@@ -4,17 +4,19 @@ use argon2::{Algorithm, Argon2, Params, PasswordHasher, PasswordVerifier, Versio
 use crate::domain::services::hash_password::HashPasswordService;
 
 #[derive(Debug, Clone)]
-pub struct Argon2PasswordService {
+pub struct Argon2HashPasswordService {
     pub secret: String,
 }
 
-impl Argon2PasswordService {
-    pub fn new(secret: String) -> Self {
-        Argon2PasswordService { secret }
+impl Argon2HashPasswordService {
+    pub fn new(secret: &str) -> Self {
+        Argon2HashPasswordService {
+            secret: secret.to_owned(),
+        }
     }
 }
 
-impl HashPasswordService for Argon2PasswordService {
+impl HashPasswordService for Argon2HashPasswordService {
     fn hash(&self, password: &str) -> Result<String, Error> {
         let argon2 = Argon2::new_with_secret(
             self.secret.as_bytes(),

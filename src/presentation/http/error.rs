@@ -10,6 +10,7 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
     NotFound(String),
+    Conflict(String),
     InternalServerError(String),
 }
 
@@ -19,6 +20,7 @@ impl ApiError {
             ApiError::BadRequest(_) => 400,
             ApiError::Unauthorized(_) => 401,
             ApiError::NotFound(_) => 404,
+            ApiError::Conflict(_) => 409,
             ApiError::InternalServerError(_) => 500,
         }
     }
@@ -28,6 +30,7 @@ impl ApiError {
             ApiError::BadRequest(m)
             | ApiError::Unauthorized(m)
             | ApiError::NotFound(m)
+            | ApiError::Conflict(m)
             | ApiError::InternalServerError(m) => m,
         }
     }
@@ -37,11 +40,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status =
             StatusCode::from_u16(self.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let body: ApiResponse<Vec<String>, Vec<String>, ()> = ApiResponse::err(
+        let body: ApiResponse<(), Vec<String>, Vec<String>> = ApiResponse::err(
             self.status(),
-            Vec::new(),
             (),
             vec![self.message().to_owned()],
+            Vec::new(),
         );
         (status, Json(body)).into_response()
     }

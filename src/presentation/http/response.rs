@@ -12,7 +12,7 @@ pub struct ApiResponse<E, M, R> {
 }
 
 impl<E, M, R> ApiResponse<E, M, R> {
-    pub fn ok(status: u16, messages: M, results: R, errors: E) -> Self {
+    pub fn ok(status: u16, errors: E, messages: M, results: R) -> Self {
         ApiResponse {
             errors,
             messages,
@@ -22,7 +22,7 @@ impl<E, M, R> ApiResponse<E, M, R> {
         }
     }
 
-    pub fn err(status: u16, messages: M, results: R, errors: E) -> Self {
+    pub fn err(status: u16, errors: E, messages: M, results: R) -> Self {
         ApiResponse {
             errors,
             messages,

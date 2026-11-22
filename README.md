@@ -9,15 +9,24 @@ The best way to deploy on your cloudflare woker is clicking the button.
 ## Configuration
 
 ```sh
-cp .env.example .env
+mise bootstrap
 ```
 
 ```sh
+cp .env.example .env
+```
+
+Run the following command to get DB_UUID
+
+```sh
 cf d1 create --name auth-worker
-cf d1 migrations apply <DATABASE_ID> --local
 ```
 
 Configure DOMAIN and DB_UUID in .env
+
+```sh
+cf d1 migrations apply $DB_UUID --local
+```
 
 ## Local development
 

@@ -28,6 +28,7 @@ export default defineConfig(() => {
         }
       },
       env: {
+        PASSWORD_PEPPER: bindings.secret(),
         "auth-worker": bindings.d1({
           name: "auth-worker",
           ...(dbUuid ? { id: dbUuid } : {}),

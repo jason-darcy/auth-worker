@@ -3,8 +3,8 @@ use crate::presentation::http::{error::ApiResult, response::ApiResponse};
 pub async fn health_handler() -> ApiResult<ApiResponse<Vec<String>, Vec<String>, Vec<String>>> {
     Ok(ApiResponse::ok(
         200,
-        vec!["service is running".to_owned()],
         Vec::new(),
+        vec!["service is running".to_owned()],
         Vec::new(),
     ))
 }
