@@ -15,6 +15,18 @@ export default defineConfig(() => {
       compatibilityDate: "2026-11-18",
       entrypoint: "build/index.js",
       ...(domain ? { domains: [domain] } : {}),
+      observability: {
+        "enabled": true,
+        "logs": {
+          "enabled": true,
+          "invocationLogs": true,
+          "headSamplingRate": 1
+        },
+        "traces": {
+          "enabled": true,
+          "headSamplingRate": 1
+        }
+      },
       env: {
         "auth-worker": bindings.d1({
           name: "auth-worker",
