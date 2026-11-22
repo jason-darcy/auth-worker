@@ -16,13 +16,15 @@ mise bootstrap
 cp .env.example .env
 ```
 
-Run the following command to get DB_UUID
+Follow the instructions in your .env and configure your .env
+
+Run the following command to get DB_UUID and set DB_UUID in .env
 
 ```sh
 cf d1 create --name auth-worker
 ```
 
-Configure DOMAIN and DB_UUID in .env
+Migrate tables in your local d1 database
 
 ```sh
 cf d1 migrations apply $DB_UUID --local

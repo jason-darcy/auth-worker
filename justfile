@@ -9,4 +9,4 @@ migrate:
     cf d1 migrations apply $DB_UUID
 
 deploy: migrate
-    cf deploy
+    cf deploy --secrets-file .env
