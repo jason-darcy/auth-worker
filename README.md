@@ -80,8 +80,8 @@ bodies:
 | POST | `/api/v1/mfa/disable` | Bearer | Turn MFA off; requires the password and a valid code |
 | POST | `/api/v1/mfa/recovery-codes` | Bearer | Reissue the recovery codes; requires the password and a valid code |
 | POST | `/api/v1/mfa/verify` | — | Exchange the sign-in challenge and a code for tokens |
-| GET | `/api/v1/openapi.json` | — | The OpenAPI 3.1 contract, generated from the types |
-| GET | `/swagger-ui` | — | Swagger UI rendering that contract |
+| GET | `/api/v1/openapi.json` | — | The OpenAPI 3.1 contract (local development only) |
+| GET | `/swagger-ui` | — | Swagger UI rendering that contract (local development only) |
 
 Authenticated endpoints expect `Authorization: Bearer <access_token>`.
 
@@ -180,6 +180,17 @@ change and its documentation cannot drift apart. There is no checked-in
 
 - `GET /api/v1/openapi.json` — the raw document (OpenAPI 3.1)
 - `GET /swagger-ui` — Swagger UI rendering it
+
+**Both are served to loopback clients only.** In production they answer the same
+`404` as an unknown path, so the API surface is not discoverable and Swagger UI
+adds no attack surface. Nothing has to be configured for that: Cloudflare sets
+`cf-connecting-ip` at the edge and overwrites whatever the client sent, so only
+`cf dev` can look like a local request. To check the deployed behaviour locally:
+
+```sh
+curl -H 'cf-connecting-ip: 203.0.113.7' http://localhost:8787/api/v1/openapi.json
+# {"errors":null,"messages":["route not found"],"results":[],"success":false}
+```
 
 The UI assets are embedded in the worker via `utoipa-swagger-ui`'s `vendored`
 feature, which means a build never has to reach GitHub. The cost is size: the

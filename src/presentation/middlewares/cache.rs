@@ -21,8 +21,10 @@ pub const NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
 /// only after revalidation, so a deploy is picked up immediately.
 pub async fn no_store(request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    let cacheable = path.ends_with("/openapi.json") || path.starts_with("/swagger-ui");
+    let is_docs = path.ends_with("/openapi.json") || path.starts_with("/swagger-ui");
     let mut response = next.run(request).await;
+    // The docs are local-only; a 404 for them must not be cached either.
+    let cacheable = is_docs && response.status().is_success();
     set_cache_control(
         response.headers_mut(),
         if cacheable { NO_CACHE } else { NO_STORE },
