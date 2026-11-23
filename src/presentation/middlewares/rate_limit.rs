@@ -10,13 +10,12 @@ use crate::{
     presentation::{
         http::error::ApiError,
         state::{AppState, RATE_LIMITER_BINDING},
+        utils::request::client_ip,
     },
 };
 
-/// Cloudflare sets this on every request that reaches a Worker.
-pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
-/// Fallback for local development, where `cf-connecting-ip` is absent.
-pub const FORWARDED_FOR_HEADER: &str = "x-forwarded-for";
+pub use crate::presentation::utils::request::{CLIENT_IP_HEADER, FORWARDED_FOR_HEADER};
+
 /// Used when no client address can be determined at all.
 pub const UNKNOWN_CLIENT_KEY: &str = "unknown-client";
 
@@ -53,15 +52,7 @@ pub async fn rate_limit(State(state): State<AppState>, request: Request, next: N
 
 /// Derives the rate limit key from the request headers.
 pub fn client_key(headers: &HeaderMap) -> String {
-    headers
-        .get(CLIENT_IP_HEADER)
-        .or_else(|| headers.get(FORWARDED_FOR_HEADER))
-        .and_then(|value| value.to_str().ok())
-        // `x-forwarded-for` may contain a chain: the first entry is the client.
-        .map(|value| value.split(',').next().unwrap_or(value).trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(UNKNOWN_CLIENT_KEY)
-        .to_owned()
+    client_ip(headers).unwrap_or_else(|| UNKNOWN_CLIENT_KEY.to_owned())
 }
 
 #[cfg(test)]

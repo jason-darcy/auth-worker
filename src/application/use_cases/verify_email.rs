@@ -159,7 +159,7 @@ mod tests {
             repositories::{
                 account::AccountRepository, verification_token::StoredVerificationToken,
             },
-            services::verification_token::{VerificationToken, VerificationTokenService},
+            services::{opaque_token::OpaqueTokenService, verification_token::VerificationToken},
         },
         testing::block_on,
     };
@@ -280,11 +280,26 @@ mod tests {
             self.deleted.borrow_mut().push(token_hash.to_owned());
             Ok(())
         }
+
+        async fn delete_tokens_for_account(&self, _account_id: &str) -> Result<(), worker::Error> {
+            Ok(())
+        }
+
+        async fn seconds_since_last_token(
+            &self,
+            _account_id: &str,
+        ) -> Result<Option<i64>, worker::Error> {
+            Ok(None)
+        }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
     }
 
     struct MockVerificationTokenService;
 
-    impl VerificationTokenService for MockVerificationTokenService {
+    impl OpaqueTokenService for MockVerificationTokenService {
         fn generate(&self) -> Result<VerificationToken, worker::Error> {
             Ok(VerificationToken {
                 raw: RAW_TOKEN.to_owned(),

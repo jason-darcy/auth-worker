@@ -1,5 +1,5 @@
 use crate::{
-    domain::services::verification_token::{VerificationToken, VerificationTokenService},
+    domain::services::opaque_token::{OpaqueToken, OpaqueTokenService},
     infrastructure::services::opaque_token::{random_hex, sha256_hex},
 };
 
@@ -15,11 +15,11 @@ impl RandomVerificationTokenService {
     }
 }
 
-impl VerificationTokenService for RandomVerificationTokenService {
-    fn generate(&self) -> Result<VerificationToken, worker::Error> {
+impl OpaqueTokenService for RandomVerificationTokenService {
+    fn generate(&self) -> Result<OpaqueToken, worker::Error> {
         let raw = random_hex(TOKEN_BYTES)?;
         let hash = self.hash(&raw);
-        Ok(VerificationToken { raw, hash })
+        Ok(OpaqueToken { raw, hash })
     }
 
     fn hash(&self, token: &str) -> String {

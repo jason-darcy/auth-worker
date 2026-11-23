@@ -1,14 +1,11 @@
-#[derive(Debug, Clone)]
-pub struct VerificationToken {
-    /// Secret handed to the account owner (embedded in the email link).
-    pub raw: String,
-    /// Value persisted in the database; the raw token is never stored.
-    pub hash: String,
-}
+pub use super::opaque_token::OpaqueToken as VerificationToken;
 
-pub trait VerificationTokenService {
-    fn generate(&self) -> Result<VerificationToken, worker::Error>;
+use super::opaque_token::OpaqueTokenService;
 
-    /// Hashes a raw token, so it can be looked up in the database.
-    fn hash(&self, token: &str) -> String;
-}
+/// Emails a one-time token and stores only its hash.
+///
+/// It is a marker trait over [`OpaqueTokenService`], so the same generator can
+/// also back MFA challenges without pretending they verify an email.
+pub trait VerificationTokenService: OpaqueTokenService {}
+
+impl<T: OpaqueTokenService + ?Sized> VerificationTokenService for T {}

@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use jiff::Timestamp;
 use serde::Serialize;
-use snafu::{ensure, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
 use crate::{
+    application::use_cases::session::SessionIssuer,
     domain::{
-        account::normalize_email,
-        repositories::{account::AccountRepository, refresh_token::RefreshTokenRepository},
+        account::{normalize_email, Account},
+        client::ClientInfo,
+        mfa::{TotpCredential, MFA_CHALLENGE_TTL},
+        repositories::{account::AccountRepository, mfa::MfaRepository},
         services::{
-            hash_password::HashPasswordService,
-            token::{IssuedTokens, TokenService},
+            hash_password::HashPasswordService, opaque_token::OpaqueTokenService,
+            token::IssuedTokens,
         },
     },
     logging::{log_error, log_info, log_warn},
@@ -32,6 +35,24 @@ pub struct SignInResult {
     pub tokens: IssuedTokens,
 }
 
+/// Returned instead of the tokens when the account has MFA enabled.
+#[derive(Debug, Serialize)]
+pub struct MfaChallengeResult {
+    /// Always `true`; it discriminates this shape from [`SignInResult`].
+    pub mfa_required: bool,
+    /// Single-use ticket for `POST /mfa/verify`.
+    pub challenge_token: String,
+    pub challenge_expires_at: Timestamp,
+}
+
+/// Either a completed sign-in or the request for the second factor.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum SignInOutcome {
+    SignedIn(SignInResult),
+    MfaRequired(MfaChallengeResult),
+}
+
 #[derive(Debug, Snafu)]
 pub enum SignInError {
     /// Returned both for unknown emails and wrong passwords so the API does
@@ -48,35 +69,44 @@ pub enum SignInError {
     VerifyPassword {
         source: argon2::password_hash::Error,
     },
-    #[snafu(display("failed to issue tokens"))]
-    IssueTokens { source: worker::Error },
-    #[snafu(display("failed to store refresh token"))]
-    StoreRefreshToken { source: worker::Error },
+    #[snafu(display("failed to find the mfa credential"))]
+    FindMfaCredential { source: worker::Error },
+    #[snafu(display("failed to create the sign-in challenge"))]
+    CreateChallenge { source: worker::Error },
+    #[snafu(display("failed to issue a session"))]
+    IssueSession { source: worker::Error },
 }
 
 pub struct SignInUseCase {
     pub account_repository: Arc<dyn AccountRepository>,
     pub hash_password_service: Arc<dyn HashPasswordService>,
-    pub refresh_token_repository: Arc<dyn RefreshTokenRepository>,
-    pub token_service: Arc<dyn TokenService>,
+    pub mfa_repository: Arc<dyn MfaRepository>,
+    pub opaque_token_service: Arc<dyn OpaqueTokenService>,
+    pub session_issuer: SessionIssuer,
 }
 
 impl SignInUseCase {
     pub fn new(
         account_repository: Arc<dyn AccountRepository>,
         hash_password_service: Arc<dyn HashPasswordService>,
-        refresh_token_repository: Arc<dyn RefreshTokenRepository>,
-        token_service: Arc<dyn TokenService>,
+        mfa_repository: Arc<dyn MfaRepository>,
+        opaque_token_service: Arc<dyn OpaqueTokenService>,
+        session_issuer: SessionIssuer,
     ) -> Self {
         SignInUseCase {
             account_repository,
             hash_password_service,
-            refresh_token_repository,
-            token_service,
+            mfa_repository,
+            opaque_token_service,
+            session_issuer,
         }
     }
 
-    pub async fn execute(&self, command: SignInCommand) -> Result<SignInResult, SignInError> {
+    pub async fn execute(
+        &self,
+        command: SignInCommand,
+        client: &ClientInfo,
+    ) -> Result<SignInOutcome, SignInError> {
         // Accounts are stored with canonical (lowercase) emails.
         let email = normalize_email(&command.email);
         let account = self
@@ -87,10 +117,27 @@ impl SignInUseCase {
                 log_error!("signin: find_account_by_email failed for {email}: {err}");
             })
             .context(FindAccountSnafu)?;
-        let Some(account) = account else {
+        let Some(mut account) = account else {
             log_warn!("signin: no account for email: {email}");
+            // Burn the same Argon2 work as a real verification, otherwise the
+            // response time reveals whether the email is registered.
+            self.hash_password_service.verify_dummy(&command.password);
             return Err(SignInError::InvalidCredentials);
         };
+
+        let now = Timestamp::now();
+        if account.is_locked(now) {
+            log_warn!(
+                "signin: account {} is locked until {:?}",
+                account.id(),
+                account.locked_until()
+            );
+            // Same work as a real verification, so a lockout cannot be told
+            // apart from a wrong password.
+            self.hash_password_service.verify_dummy(&command.password);
+            return Err(SignInError::InvalidCredentials);
+        }
+
         let password_matches = self
             .hash_password_service
             .verify(&command.password, account.password_hash())
@@ -98,39 +145,110 @@ impl SignInUseCase {
                 log_error!("signin: verify password failed for {email}: {err}");
             })
             .context(VerifyPasswordSnafu)?;
-        ensure!(password_matches, InvalidCredentialsSnafu);
+        if !password_matches {
+            self.register_failed_login(&mut account, now).await;
+            return Err(SignInError::InvalidCredentials);
+        }
         if !account.is_verified() {
             log_warn!("signin: account is not verified: {email}");
             return Err(SignInError::EmailNotVerified);
         }
-        // Only verified accounts get here, so a token pair is always issued for
-        // a usable account.
-        let account_id = account.id().to_string();
+
+        // A successful sign-in clears the brute-force counter.
+        if account.failed_login_attempts() > 0 || account.locked_until().is_some() {
+            account.reset_failed_logins();
+            if let Err(err) = self.account_repository.update_account(&account).await {
+                log_error!("signin: clearing failed logins failed for {email}: {err}");
+            }
+        }
+
+        if self.mfa_enabled(&account).await? {
+            return self
+                .start_challenge(&account)
+                .await
+                .map(SignInOutcome::MfaRequired);
+        }
+
         let tokens = self
-            .token_service
-            .issue_pair(&account_id, account.email(), account.token_version())
-            .inspect_err(|err| {
-                log_error!("signin: issue tokens failed for {email}: {err}");
-            })
-            .context(IssueTokensSnafu)?;
-        let refresh_token_hash = self.token_service.hash_refresh_token(&tokens.refresh_token);
-        self.refresh_token_repository
-            .create_token(&account_id, &refresh_token_hash, tokens.refresh_expires_at)
+            .session_issuer
+            .start(&account, client)
             .await
             .inspect_err(|err| {
-                log_error!("signin: store refresh token failed for {email}: {err}");
+                log_error!("signin: issuing a session failed for {email}: {err}");
             })
-            .context(StoreRefreshTokenSnafu)?;
+            .context(IssueSessionSnafu)?;
 
         let result = SignInResult {
             id: account.id(),
             name: account.name().to_owned(),
             email: account.email().to_owned(),
             created_at: account.created_at(),
-            tokens: tokens.into(),
+            tokens,
         };
         log_info!("signin: account {} signed in", result.id);
-        Ok(result)
+        Ok(SignInOutcome::SignedIn(result))
+    }
+
+    /// `true` when the account finished an MFA enrolment.
+    async fn mfa_enabled(&self, account: &Account) -> Result<bool, SignInError> {
+        let account_id = account.id().to_string();
+        let credential = self
+            .mfa_repository
+            .find_credential(&account_id)
+            .await
+            .inspect_err(|err| {
+                log_error!("signin: find_credential failed for {account_id}: {err}");
+            })
+            .context(FindMfaCredentialSnafu)?;
+        Ok(credential.is_some_and(|credential: TotpCredential| credential.is_confirmed()))
+    }
+
+    /// The password was correct but the second factor is still missing.
+    async fn start_challenge(&self, account: &Account) -> Result<MfaChallengeResult, SignInError> {
+        let account_id = account.id().to_string();
+        let token = self
+            .opaque_token_service
+            .generate()
+            .inspect_err(|err| {
+                log_error!("signin: generating a challenge token failed for {account_id}: {err}");
+            })
+            .context(CreateChallengeSnafu)?;
+        let challenge_expires_at = Timestamp::now()
+            .saturating_add(MFA_CHALLENGE_TTL)
+            .unwrap_or(Timestamp::MAX);
+        self.mfa_repository
+            .create_challenge(&account_id, &token.hash, challenge_expires_at)
+            .await
+            .inspect_err(|err| {
+                log_error!("signin: create_challenge failed for {account_id}: {err}");
+            })
+            .context(CreateChallengeSnafu)?;
+
+        log_info!("signin: second factor required for account {account_id}");
+        Ok(MfaChallengeResult {
+            mfa_required: true,
+            challenge_token: token.raw,
+            challenge_expires_at,
+        })
+    }
+
+    /// Records a failed attempt. Best-effort: the caller answers the same way
+    /// whether or not the counter could be persisted.
+    async fn register_failed_login(&self, account: &mut Account, now: Timestamp) {
+        let locked = account.register_failed_login(now);
+        if locked {
+            log_warn!(
+                "signin: account {} locked after {} failed attempts",
+                account.id(),
+                crate::domain::account::MAX_FAILED_LOGIN_ATTEMPTS
+            );
+        }
+        if let Err(err) = self.account_repository.update_account(account).await {
+            log_error!(
+                "signin: storing failed login attempt failed for {}: {err}",
+                account.id()
+            );
+        }
     }
 }
 
@@ -147,14 +265,19 @@ mod tests {
     use super::*;
     use crate::{
         domain::{
-            account::Account,
+            account::{Account, MAX_FAILED_LOGIN_ATTEMPTS},
+            mfa::TotpCredential,
             repositories::{
                 account::AccountRepository,
-                refresh_token::{RefreshTokenRepository, StoredRefreshToken},
+                mfa::MfaRepository,
+                refresh_token::{
+                    NewRefreshToken, RefreshTokenRepository, SessionInfo, StoredRefreshToken,
+                },
             },
             services::{
                 hash_password::HashPasswordService,
-                token::{AccessTokenClaims, TokenPair},
+                opaque_token::{OpaqueToken, OpaqueTokenService},
+                token::{AccessTokenClaims, TokenPair, TokenService},
             },
         },
         testing::block_on,
@@ -165,6 +288,7 @@ mod tests {
         existing: Option<Account>,
         fail_find: bool,
         looked_up: RefCell<Vec<String>>,
+        updates: RefCell<Vec<Account>>,
     }
 
     impl MockAccountRepository {
@@ -211,7 +335,8 @@ mod tests {
                 .filter(|account| account.email() == email))
         }
 
-        async fn update_account(&self, _account: &Account) -> Result<(), worker::Error> {
+        async fn update_account(&self, account: &Account) -> Result<(), worker::Error> {
+            self.updates.borrow_mut().push(account.clone());
             Ok(())
         }
 
@@ -224,6 +349,7 @@ mod tests {
         password_matches: bool,
         fail_verify: bool,
         verified: RefCell<Vec<(String, String)>>,
+        dummy_verifications: RefCell<Vec<String>>,
     }
 
     impl MockHashPasswordService {
@@ -232,6 +358,7 @@ mod tests {
                 password_matches: true,
                 fail_verify: false,
                 verified: RefCell::new(Vec::new()),
+                dummy_verifications: RefCell::new(Vec::new()),
             }
         }
 
@@ -252,6 +379,10 @@ mod tests {
         fn verified_pairs(&self) -> Vec<(String, String)> {
             self.verified.borrow().clone()
         }
+
+        fn dummy_verifications(&self) -> Vec<String> {
+            self.dummy_verifications.borrow().clone()
+        }
     }
 
     impl HashPasswordService for MockHashPasswordService {
@@ -268,12 +399,18 @@ mod tests {
             }
             Ok(self.password_matches)
         }
+
+        fn verify_dummy(&self, password: &str) {
+            self.dummy_verifications
+                .borrow_mut()
+                .push(password.to_owned());
+        }
     }
 
     #[derive(Default)]
     struct MockRefreshTokenRepository {
         fail: bool,
-        stored: RefCell<Vec<(String, String, Timestamp)>>,
+        stored: RefCell<Vec<NewRefreshToken>>,
     }
 
     impl MockRefreshTokenRepository {
@@ -284,27 +421,18 @@ mod tests {
             }
         }
 
-        fn stored_tokens(&self) -> Vec<(String, String, Timestamp)> {
+        fn stored_tokens(&self) -> Vec<NewRefreshToken> {
             self.stored.borrow().clone()
         }
     }
 
     #[async_trait(?Send)]
     impl RefreshTokenRepository for MockRefreshTokenRepository {
-        async fn create_token(
-            &self,
-            account_id: &str,
-            token_hash: &str,
-            expires_at: Timestamp,
-        ) -> Result<(), worker::Error> {
+        async fn create_token(&self, token: NewRefreshToken) -> Result<(), worker::Error> {
             if self.fail {
                 return Err(worker::Error::RustError("d1 insert failed".to_owned()));
             }
-            self.stored.borrow_mut().push((
-                account_id.to_owned(),
-                token_hash.to_owned(),
-                expires_at,
-            ));
+            self.stored.borrow_mut().push(token);
             Ok(())
         }
 
@@ -315,12 +443,143 @@ mod tests {
             Ok(None)
         }
 
-        async fn delete_token(&self, _token_hash: &str) -> Result<(), worker::Error> {
+        async fn rotate_token(
+            &self,
+            _old_token_hash: &str,
+            _next: NewRefreshToken,
+        ) -> Result<(), worker::Error> {
             Ok(())
+        }
+
+        async fn delete_session(
+            &self,
+            _account_id: &str,
+            _family_id: &str,
+        ) -> Result<bool, worker::Error> {
+            Ok(false)
         }
 
         async fn delete_tokens_for_account(&self, _account_id: &str) -> Result<(), worker::Error> {
             Ok(())
+        }
+
+        async fn list_sessions(
+            &self,
+            _account_id: &str,
+        ) -> Result<Vec<SessionInfo>, worker::Error> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Default)]
+    struct MockMfaRepository {
+        credential: Option<TotpCredential>,
+        challenges: RefCell<Vec<(String, String)>>,
+        fail_find: bool,
+    }
+
+    impl MockMfaRepository {
+        fn with_credential(credential: TotpCredential) -> Self {
+            MockMfaRepository {
+                credential: Some(credential),
+                ..Default::default()
+            }
+        }
+
+        fn challenges(&self) -> Vec<(String, String)> {
+            self.challenges.borrow().clone()
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl MfaRepository for MockMfaRepository {
+        async fn find_credential(
+            &self,
+            _account_id: &str,
+        ) -> Result<Option<TotpCredential>, worker::Error> {
+            if self.fail_find {
+                return Err(worker::Error::RustError("d1 select failed".to_owned()));
+            }
+            Ok(self.credential.clone())
+        }
+
+        async fn save_credential(&self, _credential: &TotpCredential) -> Result<(), worker::Error> {
+            Ok(())
+        }
+
+        async fn delete_credential(&self, _account_id: &str) -> Result<(), worker::Error> {
+            Ok(())
+        }
+
+        async fn replace_recovery_codes(
+            &self,
+            _account_id: &str,
+            _code_hashes: &[String],
+        ) -> Result<(), worker::Error> {
+            Ok(())
+        }
+
+        async fn consume_recovery_code(
+            &self,
+            _account_id: &str,
+            _code_hash: &str,
+        ) -> Result<bool, worker::Error> {
+            Ok(false)
+        }
+
+        async fn count_recovery_codes(&self, _account_id: &str) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
+
+        async fn create_challenge(
+            &self,
+            account_id: &str,
+            token_hash: &str,
+            _expires_at: Timestamp,
+        ) -> Result<(), worker::Error> {
+            self.challenges
+                .borrow_mut()
+                .push((account_id.to_owned(), token_hash.to_owned()));
+            Ok(())
+        }
+
+        async fn find_challenge(
+            &self,
+            _token_hash: &str,
+        ) -> Result<Option<crate::domain::mfa::StoredMfaChallenge>, worker::Error> {
+            Ok(None)
+        }
+
+        async fn record_challenge_attempt(&self, _token_hash: &str) -> Result<u32, worker::Error> {
+            Ok(1)
+        }
+
+        async fn delete_challenge(&self, _token_hash: &str) -> Result<(), worker::Error> {
+            Ok(())
+        }
+
+        async fn delete_expired_challenges(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Default)]
+    struct MockOpaqueTokenService;
+
+    impl OpaqueTokenService for MockOpaqueTokenService {
+        fn generate(&self) -> Result<OpaqueToken, worker::Error> {
+            Ok(OpaqueToken {
+                raw: "challenge-token".to_owned(),
+                hash: "hash:challenge-token".to_owned(),
+            })
+        }
+
+        fn hash(&self, token: &str) -> String {
+            format!("hash:{token}")
         }
     }
 
@@ -355,6 +614,7 @@ mod tests {
             account_id: &str,
             email: &str,
             token_version: u32,
+            _session_id: &str,
         ) -> Result<TokenPair, worker::Error> {
             if self.fail {
                 return Err(worker::Error::RustError("signing failed".to_owned()));
@@ -388,6 +648,7 @@ mod tests {
         hasher: Arc<MockHashPasswordService>,
         refresh_tokens: Arc<MockRefreshTokenRepository>,
         tokens: Arc<MockTokenService>,
+        mfa: Arc<MockMfaRepository>,
     }
 
     impl Fixture {
@@ -397,6 +658,7 @@ mod tests {
                 hasher: Arc::new(MockHashPasswordService::matching()),
                 refresh_tokens: Arc::new(MockRefreshTokenRepository::default()),
                 tokens: Arc::new(MockTokenService::new()),
+                mfa: Arc::new(MockMfaRepository::default()),
             }
         }
 
@@ -404,9 +666,29 @@ mod tests {
             SignInUseCase::new(
                 self.accounts.clone(),
                 self.hasher.clone(),
-                self.refresh_tokens.clone(),
-                self.tokens.clone(),
+                self.mfa.clone(),
+                Arc::new(MockOpaqueTokenService),
+                SessionIssuer::new(self.refresh_tokens.clone(), self.tokens.clone()),
             )
+        }
+
+        fn with_mfa(accounts: MockAccountRepository, mfa: MockMfaRepository) -> Self {
+            Fixture {
+                mfa: Arc::new(mfa),
+                ..Self::new(accounts)
+            }
+        }
+
+        /// Runs a sign-in that is expected to complete without a second factor.
+        fn sign_in(&self, command: SignInCommand) -> Result<SignInResult, SignInError> {
+            block_on(self.use_case().execute(command, &ClientInfo::default())).map(|outcome| {
+                match outcome {
+                    SignInOutcome::SignedIn(result) => result,
+                    SignInOutcome::MfaRequired(_) => {
+                        panic!("expected a completed sign-in, got an MFA challenge")
+                    }
+                }
+            })
         }
     }
 
@@ -418,6 +700,15 @@ mod tests {
 
     fn unverified_account() -> Account {
         Account::new("Ada Lovelace", "ada@example.com", "hashed:s3cret-pass")
+    }
+
+    fn account_with_failures(attempts: u32) -> Account {
+        let mut account = stored_account();
+        let now = Timestamp::now();
+        for _ in 0..attempts {
+            account.register_failed_login(now);
+        }
+        account
     }
 
     fn command() -> SignInCommand {
@@ -432,8 +723,7 @@ mod tests {
         let account = stored_account();
         let fixture = Fixture::new(MockAccountRepository::with_account(account.clone()));
 
-        let result =
-            block_on(fixture.use_case().execute(command())).expect("signin should succeed");
+        let result = fixture.sign_in(command()).expect("signin should succeed");
 
         assert_eq!(result.id, account.id());
         assert_eq!(result.name, "Ada Lovelace");
@@ -454,8 +744,7 @@ mod tests {
         let account = stored_account();
         let fixture = Fixture::new(MockAccountRepository::with_account(account.clone()));
 
-        let result =
-            block_on(fixture.use_case().execute(command())).expect("signin should succeed");
+        let result = fixture.sign_in(command()).expect("signin should succeed");
 
         assert_eq!(result.tokens.token_type, "Bearer");
         assert_eq!(
@@ -474,14 +763,79 @@ mod tests {
             )],
             "tokens must be issued for the authenticated account and its token version"
         );
+        let stored = fixture.refresh_tokens.stored_tokens();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].account_id, account.id().to_string());
+        assert_eq!(stored[0].token_hash, "hash:refresh-token");
+        assert_eq!(stored[0].expires_at, result.tokens.refresh_token_expires_at);
+        assert!(
+            !stored[0].family_id.is_empty(),
+            "a sign-in must open a session"
+        );
+    }
+
+    fn confirmed_credential(account: &Account) -> TotpCredential {
+        let mut credential = TotpCredential::new(&account.id().to_string(), "JBSWY3DPEHPK3PXP");
+        credential.confirm(Timestamp::now(), 1);
+        credential
+    }
+
+    #[test]
+    fn asks_for_the_second_factor_when_mfa_is_enabled() {
+        let account = stored_account();
+        let fixture = Fixture::with_mfa(
+            MockAccountRepository::with_account(account.clone()),
+            MockMfaRepository::with_credential(confirmed_credential(&account)),
+        );
+
+        let outcome = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect("signin should reach the second factor");
+
+        match outcome {
+            SignInOutcome::MfaRequired(challenge) => {
+                assert!(challenge.mfa_required);
+                assert_eq!(challenge.challenge_token, "challenge-token");
+                assert!(challenge.challenge_expires_at > Timestamp::now());
+            }
+            SignInOutcome::SignedIn(_) => {
+                panic!("no tokens may be issued before the second factor")
+            }
+        }
+        assert!(
+            fixture.tokens.issued_for().is_empty(),
+            "no access token may be issued before the second factor"
+        );
+        assert!(
+            fixture.refresh_tokens.stored_tokens().is_empty(),
+            "no session may be opened before the second factor"
+        );
         assert_eq!(
-            fixture.refresh_tokens.stored_tokens(),
-            vec![(
-                account.id().to_string(),
-                "hash:refresh-token".to_owned(),
-                result.tokens.refresh_token_expires_at,
-            )],
-            "the refresh token must be stored hashed with its expiry"
+            fixture.mfa.challenges(),
+            vec![(account.id().to_string(), "hash:challenge-token".to_owned())]
+        );
+    }
+
+    #[test]
+    fn ignores_a_pending_mfa_enrolment() {
+        let account = stored_account();
+        let fixture = Fixture::with_mfa(
+            MockAccountRepository::with_account(account.clone()),
+            MockMfaRepository::with_credential(TotpCredential::new(
+                &account.id().to_string(),
+                "JBSWY3DPEHPK3PXP",
+            )),
+        );
+
+        let result = fixture.sign_in(command()).expect("signin should succeed");
+
+        assert_eq!(result.id, account.id());
+        assert!(
+            fixture.mfa.challenges().is_empty(),
+            "an unfinished enrolment must not block the sign-in"
         );
     }
 
@@ -494,7 +848,7 @@ mod tests {
             email: "  ADA@Example.COM ".to_owned(),
             password: "s3cret-pass".to_owned(),
         };
-        let result = block_on(fixture.use_case().execute(command)).expect("signin should succeed");
+        let result = fixture.sign_in(command).expect("signin should succeed");
 
         assert_eq!(result.id, account.id());
         assert_eq!(
@@ -507,7 +861,8 @@ mod tests {
     fn rejects_unverified_account_after_correct_password() {
         let fixture = Fixture::new(MockAccountRepository::with_account(unverified_account()));
 
-        let error = block_on(fixture.use_case().execute(command()))
+        let error = fixture
+            .sign_in(command())
             .expect_err("unverified account must fail");
 
         assert!(matches!(error, SignInError::EmailNotVerified));
@@ -525,14 +880,94 @@ mod tests {
     }
 
     #[test]
+    fn counts_failed_sign_ins() {
+        let fixture = Fixture {
+            hasher: Arc::new(MockHashPasswordService::not_matching()),
+            ..Fixture::new(MockAccountRepository::with_account(account_with_failures(
+                2,
+            )))
+        };
+
+        fixture
+            .sign_in(command())
+            .expect_err("wrong password must fail");
+
+        let updates = fixture.accounts.updates.borrow();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].failed_login_attempts(), 3);
+        assert!(updates[0].locked_until().is_none());
+    }
+
+    #[test]
+    fn locks_the_account_after_repeated_failures() {
+        let fixture = Fixture {
+            hasher: Arc::new(MockHashPasswordService::not_matching()),
+            ..Fixture::new(MockAccountRepository::with_account(account_with_failures(
+                9,
+            )))
+        };
+
+        let error = fixture
+            .sign_in(command())
+            .expect_err("wrong password must fail");
+
+        assert!(matches!(error, SignInError::InvalidCredentials));
+        let updates = fixture.accounts.updates.borrow();
+        assert_eq!(updates.len(), 1);
+        assert!(
+            updates[0].locked_until().is_some(),
+            "the tenth failure must lock the account"
+        );
+    }
+
+    #[test]
+    fn refuses_locked_accounts_without_checking_the_password() {
+        let fixture = Fixture::new(MockAccountRepository::with_account(account_with_failures(
+            MAX_FAILED_LOGIN_ATTEMPTS,
+        )));
+
+        let error = fixture
+            .sign_in(command())
+            .expect_err("a locked account must be refused");
+
+        assert!(matches!(error, SignInError::InvalidCredentials));
+        assert!(
+            fixture.hasher.verified_pairs().is_empty(),
+            "no real verification may run for a locked account"
+        );
+        assert_eq!(
+            fixture.hasher.dummy_verifications(),
+            vec!["s3cret-pass".to_owned()],
+            "a lockout must still burn the same Argon2 work"
+        );
+        assert!(fixture.accounts.updates.borrow().is_empty());
+        assert!(fixture.tokens.issued_for().is_empty());
+    }
+
+    #[test]
+    fn clears_failed_sign_ins_after_a_successful_one() {
+        let fixture = Fixture::new(MockAccountRepository::with_account(account_with_failures(
+            3,
+        )));
+
+        fixture.sign_in(command()).expect("signin should succeed");
+
+        let updates = fixture.accounts.updates.borrow();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].failed_login_attempts(), 0);
+        assert!(updates[0].locked_until().is_none());
+    }
+
+    #[test]
     fn rejects_wrong_password_before_revealing_verification_state() {
         let fixture = Fixture {
             hasher: Arc::new(MockHashPasswordService::not_matching()),
             ..Fixture::new(MockAccountRepository::with_account(unverified_account()))
         };
 
-        let error =
-            block_on(fixture.use_case().execute(command())).expect_err("wrong password must fail");
+        let error = fixture
+            .sign_in(command())
+            .expect_err("wrong password must fail");
 
         assert!(matches!(error, SignInError::InvalidCredentials));
         assert_eq!(error.to_string(), "invalid email or password");
@@ -540,16 +975,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_email_without_verifying_password() {
+    fn rejects_unknown_email_and_still_spends_the_hashing_work() {
         let fixture = Fixture::new(MockAccountRepository::default());
 
-        let error =
-            block_on(fixture.use_case().execute(command())).expect_err("unknown email must fail");
+        let error = fixture
+            .sign_in(command())
+            .expect_err("unknown email must fail");
 
         assert!(matches!(error, SignInError::InvalidCredentials));
         assert_eq!(error.to_string(), "invalid email or password");
-        assert!(fixture.hasher.verified_pairs().is_empty());
+        assert!(
+            fixture.hasher.verified_pairs().is_empty(),
+            "there is no stored hash to verify against"
+        );
+        assert_eq!(
+            fixture.hasher.dummy_verifications(),
+            vec!["s3cret-pass".to_owned()],
+            "unknown emails must burn the same Argon2 work as known ones"
+        );
         assert!(fixture.tokens.issued_for().is_empty());
+    }
+
+    #[test]
+    fn known_emails_never_run_the_dummy_verification() {
+        let fixture = Fixture::new(MockAccountRepository::with_account(stored_account()));
+
+        fixture.sign_in(command()).expect("signin should succeed");
+
+        assert!(fixture.hasher.dummy_verifications().is_empty());
     }
 
     #[test]
@@ -559,7 +1012,8 @@ mod tests {
             ..Default::default()
         });
 
-        let error = block_on(fixture.use_case().execute(command()))
+        let error = fixture
+            .sign_in(command())
             .expect_err("lookup failure must surface");
 
         assert!(matches!(error, SignInError::FindAccount { .. }));
@@ -573,7 +1027,8 @@ mod tests {
             ..Fixture::new(MockAccountRepository::with_account(stored_account()))
         };
 
-        let error = block_on(fixture.use_case().execute(command()))
+        let error = fixture
+            .sign_in(command())
             .expect_err("verify failure must surface");
 
         assert!(matches!(error, SignInError::VerifyPassword { .. }));
@@ -587,10 +1042,11 @@ mod tests {
             ..Fixture::new(MockAccountRepository::with_account(stored_account()))
         };
 
-        let error = block_on(fixture.use_case().execute(command()))
+        let error = fixture
+            .sign_in(command())
             .expect_err("token issuance failure must surface");
 
-        assert!(matches!(error, SignInError::IssueTokens { .. }));
+        assert!(matches!(error, SignInError::IssueSession { .. }));
         assert!(fixture.refresh_tokens.stored_tokens().is_empty());
     }
 
@@ -601,9 +1057,10 @@ mod tests {
             ..Fixture::new(MockAccountRepository::with_account(stored_account()))
         };
 
-        let error = block_on(fixture.use_case().execute(command()))
+        let error = fixture
+            .sign_in(command())
             .expect_err("refresh token storage failure must surface");
 
-        assert!(matches!(error, SignInError::StoreRefreshToken { .. }));
+        assert!(matches!(error, SignInError::IssueSession { .. }));
     }
 }

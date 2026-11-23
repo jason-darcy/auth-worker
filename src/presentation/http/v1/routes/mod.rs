@@ -1,8 +1,14 @@
 pub mod account;
+pub mod change_password;
 pub mod forgot_password;
 pub mod health;
+pub mod mfa;
+pub mod openapi;
 pub mod refresh_tokens;
+pub mod resend_verification;
 pub mod reset_password;
+pub mod sessions;
 pub mod signin;
+pub mod signout;
 pub mod signup;
 pub mod verify_email;

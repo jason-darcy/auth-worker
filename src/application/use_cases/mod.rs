@@ -1,6 +1,16 @@
+pub mod change_password;
+pub mod cleanup;
+pub mod delete_account;
 pub mod forgot_password;
+pub mod mfa;
 pub mod refresh_tokens;
+pub mod resend_verification;
 pub mod reset_password;
+pub mod second_factor;
+pub mod session;
+pub mod sessions;
 pub mod signin;
+pub mod signout;
 pub mod signup;
+pub mod verification_email;
 pub mod verify_email;

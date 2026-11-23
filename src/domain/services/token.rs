@@ -14,6 +14,10 @@ pub struct AccessTokenClaims {
     /// Account id.
     pub sub: String,
     pub email: String,
+    /// Session (refresh token family) the token was issued for. Empty for
+    /// tokens issued before sessions existed.
+    #[serde(default)]
+    pub sid: String,
     /// Always [`ACCESS_TOKEN_TYPE`] for access tokens.
     pub typ: String,
     pub iss: String,
@@ -61,11 +65,15 @@ impl From<TokenPair> for IssuedTokens {
 
 pub trait TokenService {
     /// Signs an access token and generates a refresh token for the account.
+    ///
+    /// `session_id` is the refresh token family: it lands in the `sid` claim so
+    /// the session list can tell which entry is the caller's own.
     fn issue_pair(
         &self,
         account_id: &str,
         email: &str,
         token_version: u32,
+        session_id: &str,
     ) -> Result<TokenPair, worker::Error>;
 
     /// Validates an access token and returns its claims.

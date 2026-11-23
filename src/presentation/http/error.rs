@@ -11,6 +11,7 @@ pub enum ApiError {
     Unauthorized(String),
     Forbidden(String),
     NotFound(String),
+    MethodNotAllowed(String),
     Conflict(String),
     TooManyRequests(String),
     InternalServerError(String),
@@ -23,6 +24,7 @@ impl ApiError {
             ApiError::Unauthorized(_) => 401,
             ApiError::Forbidden(_) => 403,
             ApiError::NotFound(_) => 404,
+            ApiError::MethodNotAllowed(_) => 405,
             ApiError::Conflict(_) => 409,
             ApiError::TooManyRequests(_) => 429,
             ApiError::InternalServerError(_) => 500,
@@ -35,6 +37,7 @@ impl ApiError {
             | ApiError::Unauthorized(m)
             | ApiError::Forbidden(m)
             | ApiError::NotFound(m)
+            | ApiError::MethodNotAllowed(m)
             | ApiError::Conflict(m)
             | ApiError::TooManyRequests(m)
             | ApiError::InternalServerError(m) => m,

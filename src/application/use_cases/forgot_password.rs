@@ -16,6 +16,11 @@ use crate::{
 
 /// Reset links are short-lived: 30 minutes.
 pub const PASSWORD_RESET_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Minimum delay between two reset emails for the same account.
+///
+/// Stops the endpoint from being used to flood somebody's inbox; a throttled
+/// request still answers exactly like a delivered one.
+pub const PASSWORD_RESET_EMAIL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct ForgotPasswordCommand {
     pub email: String,
@@ -68,6 +73,11 @@ impl ForgotPasswordUseCase {
             return Ok(());
         };
 
+        let account_id = account.id().to_string();
+        if self.throttled(&account_id, &email).await {
+            return Ok(());
+        }
+
         let token = match self.token_service.generate() {
             Ok(token) => token,
             Err(err) => {
@@ -78,7 +88,6 @@ impl ForgotPasswordUseCase {
                 return Ok(());
             }
         };
-        let account_id = account.id().to_string();
         // Only the newest link may work.
         if let Err(err) = self
             .password_reset_token_repository
@@ -111,6 +120,26 @@ impl ForgotPasswordUseCase {
         log_info!("forgot_password: reset link sent to {email}");
         Ok(())
     }
+
+    /// `true` when a reset link was already sent recently. Lookup failures fail
+    /// open, so a broken throttle query cannot block a legitimate reset.
+    async fn throttled(&self, account_id: &str, email: &str) -> bool {
+        match self
+            .password_reset_token_repository
+            .seconds_since_last_token(account_id)
+            .await
+        {
+            Ok(Some(age)) if age >= 0 && (age as u64) < PASSWORD_RESET_EMAIL_COOLDOWN.as_secs() => {
+                log_info!("forgot_password: throttled {email}, last link was sent {age}s ago");
+                true
+            }
+            Ok(_) => false,
+            Err(err) => {
+                log_error!("forgot_password: cooldown lookup failed for {email}: {err}");
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,8 +160,8 @@ mod tests {
                 password_reset_token::{PasswordResetTokenRepository, StoredPasswordResetToken},
             },
             services::{
-                email::EmailService,
-                verification_token::{VerificationToken, VerificationTokenService},
+                email::EmailService, opaque_token::OpaqueTokenService,
+                verification_token::VerificationToken,
             },
         },
         testing::block_on,
@@ -214,6 +243,7 @@ mod tests {
         fail_delete: bool,
         revoked: RefCell<Vec<String>>,
         created: RefCell<Vec<(String, String, Timestamp)>>,
+        seconds_since_last_token: Option<i64>,
     }
 
     impl MockPasswordResetTokenRepository {
@@ -263,6 +293,17 @@ mod tests {
         async fn delete_token(&self, _token_hash: &str) -> Result<(), worker::Error> {
             Ok(())
         }
+
+        async fn seconds_since_last_token(
+            &self,
+            _account_id: &str,
+        ) -> Result<Option<i64>, worker::Error> {
+            Ok(self.seconds_since_last_token)
+        }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
     }
 
     struct MockVerificationTokenService {
@@ -290,7 +331,7 @@ mod tests {
         }
     }
 
-    impl VerificationTokenService for MockVerificationTokenService {
+    impl OpaqueTokenService for MockVerificationTokenService {
         fn generate(&self) -> Result<VerificationToken, worker::Error> {
             *self.generated.borrow_mut() += 1;
             if self.fail {

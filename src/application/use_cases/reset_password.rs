@@ -197,11 +197,13 @@ mod tests {
             repositories::{
                 account::AccountRepository,
                 password_reset_token::{PasswordResetTokenRepository, StoredPasswordResetToken},
-                refresh_token::{RefreshTokenRepository, StoredRefreshToken},
+                refresh_token::{
+                    NewRefreshToken, RefreshTokenRepository, SessionInfo, StoredRefreshToken,
+                },
             },
             services::{
-                hash_password::HashPasswordService,
-                verification_token::{VerificationToken, VerificationTokenService},
+                hash_password::HashPasswordService, opaque_token::OpaqueTokenService,
+                verification_token::VerificationToken,
             },
         },
         testing::block_on,
@@ -317,6 +319,13 @@ mod tests {
             Ok(())
         }
 
+        async fn seconds_since_last_token(
+            &self,
+            _account_id: &str,
+        ) -> Result<Option<i64>, worker::Error> {
+            Ok(None)
+        }
+
         async fn delete_tokens_for_account(&self, _account_id: &str) -> Result<(), worker::Error> {
             Ok(())
         }
@@ -339,6 +348,10 @@ mod tests {
             self.deleted.borrow_mut().push(token_hash.to_owned());
             Ok(())
         }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
     }
 
     #[derive(Default)]
@@ -355,12 +368,7 @@ mod tests {
 
     #[async_trait(?Send)]
     impl RefreshTokenRepository for MockRefreshTokenRepository {
-        async fn create_token(
-            &self,
-            _account_id: &str,
-            _token_hash: &str,
-            _expires_at: Timestamp,
-        ) -> Result<(), worker::Error> {
+        async fn create_token(&self, _token: NewRefreshToken) -> Result<(), worker::Error> {
             Ok(())
         }
 
@@ -371,8 +379,27 @@ mod tests {
             Ok(None)
         }
 
-        async fn delete_token(&self, _token_hash: &str) -> Result<(), worker::Error> {
+        async fn rotate_token(
+            &self,
+            _old_token_hash: &str,
+            _next: NewRefreshToken,
+        ) -> Result<(), worker::Error> {
             Ok(())
+        }
+
+        async fn delete_session(
+            &self,
+            _account_id: &str,
+            _family_id: &str,
+        ) -> Result<bool, worker::Error> {
+            Ok(false)
+        }
+
+        async fn list_sessions(
+            &self,
+            _account_id: &str,
+        ) -> Result<Vec<SessionInfo>, worker::Error> {
+            Ok(Vec::new())
         }
 
         async fn delete_tokens_for_account(&self, account_id: &str) -> Result<(), worker::Error> {
@@ -381,6 +408,10 @@ mod tests {
             }
             self.revoked.borrow_mut().push(account_id.to_owned());
             Ok(())
+        }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
         }
     }
 
@@ -421,11 +452,13 @@ mod tests {
         fn verify(&self, _password: &str, _password_hash: &str) -> Result<bool, PasswordHashError> {
             Ok(false)
         }
+
+        fn verify_dummy(&self, _password: &str) {}
     }
 
     struct MockVerificationTokenService;
 
-    impl VerificationTokenService for MockVerificationTokenService {
+    impl OpaqueTokenService for MockVerificationTokenService {
         fn generate(&self) -> Result<VerificationToken, worker::Error> {
             Ok(VerificationToken {
                 raw: RAW_TOKEN.to_owned(),

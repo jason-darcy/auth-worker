@@ -1,7 +1,6 @@
 use axum::{
     extract::State,
     http::{HeaderMap, Uri},
-    Json,
 };
 use serde::Deserialize;
 use snafu::{ensure, Snafu};
@@ -20,7 +19,7 @@ use crate::{
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING, EMAIL_BINDING},
-        utils::validation::is_valid_email,
+        utils::{extract::ApiJson, validation::is_valid_email},
     },
 };
 
@@ -73,7 +72,7 @@ pub async fn forgot_password_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-    Json(payload): Json<ForgotPasswordPayload>,
+    ApiJson(payload): ApiJson<ForgotPasswordPayload>,
 ) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, ()>> {
     let command = ForgotPasswordCommand::try_from(payload).map_err(|err| {
         log_warn!("forgot_password: invalid payload: {err}");

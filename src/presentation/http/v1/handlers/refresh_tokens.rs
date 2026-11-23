@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, http::HeaderMap};
 use serde::Deserialize;
 use snafu::{ensure, Snafu};
 
@@ -16,7 +16,7 @@ use crate::{
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
-        utils::validation::is_valid_opaque_token,
+        utils::{extract::ApiJson, request::client_info, validation::is_valid_opaque_token},
     },
 };
 
@@ -68,7 +68,8 @@ impl TryFrom<RefreshTokensPayload> for RefreshTokensCommand {
 #[worker::send]
 pub async fn refresh_tokens_handler(
     State(state): State<AppState>,
-    Json(payload): Json<RefreshTokensPayload>,
+    headers: HeaderMap,
+    ApiJson(payload): ApiJson<RefreshTokensPayload>,
 ) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, RefreshTokensResult>> {
     let command = RefreshTokensCommand::try_from(payload).map_err(|err| {
         log_warn!("refresh: invalid payload: {err}");
@@ -82,10 +83,13 @@ pub async fn refresh_tokens_handler(
         log_error!("refresh: d1 binding `{D1_BINDING}` unavailable for refresh tokens: {err}");
         ApiError::InternalServerError("database binding is unavailable".to_owned())
     })?;
-    let token_service = state.token_service();
+    let token_service = state.token_service().map_err(|err| {
+        log_error!("refresh: token signing is misconfigured: {err}");
+        ApiError::InternalServerError("server is misconfigured".to_owned())
+    })?;
     let case =
         RefreshTokensUseCase::new(account_repository, refresh_token_repository, token_service);
-    let result = match case.execute(command).await {
+    let result = match case.execute(command, &client_info(&headers)).await {
         Ok(result) => result,
         Err(err) => {
             log_error!("refresh: failed: {err}");

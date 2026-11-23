@@ -58,6 +58,44 @@ fn authorize(
     Ok(id)
 }
 
+/// Loads the account behind an authenticated id.
+async fn load_account(state: &AppState, id: Uuid) -> ApiResult<AccountResult> {
+    let account_repository = state.account_repository().map_err(|err| {
+        log_error!("account: d1 binding `{D1_BINDING}` unavailable: {err}");
+        ApiError::InternalServerError("database binding is unavailable".to_owned())
+    })?;
+    let account = account_repository
+        .find_account_by_id(&id.to_string())
+        .await
+        .map_err(|err| {
+            log_error!("account: find_account_by_id failed for {id}: {err}");
+            ApiError::InternalServerError("internal server error".to_owned())
+        })?
+        .ok_or_else(|| {
+            log_warn!("account: {id} no longer exists");
+            ApiError::NotFound("account not found".to_owned())
+        })?;
+
+    Ok(AccountResult {
+        id: account.id(),
+        name: account.name().to_owned(),
+        email: account.email().to_owned(),
+        is_verified: account.is_verified(),
+        created_at: account.created_at(),
+    })
+}
+
+/// `GET /account/me` — the account behind the presented access token.
+#[worker::send]
+pub async fn me_handler(
+    State(state): State<AppState>,
+    Extension(authenticated): Extension<AuthenticatedAccount>,
+) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, AccountResult>> {
+    let account = load_account(&state, authenticated.id).await?;
+
+    Ok(ApiResponse::ok(200, Vec::new(), Vec::new(), account))
+}
+
 #[worker::send]
 pub async fn get_account_handler(
     State(state): State<AppState>,
@@ -71,34 +109,9 @@ pub async fn get_account_handler(
         );
         ApiError::from(err)
     })?;
-    let account_repository = state.account_repository().map_err(|err| {
-        log_error!("account: d1 binding `{D1_BINDING}` unavailable: {err}");
-        ApiError::InternalServerError("database binding is unavailable".to_owned())
-    })?;
-    let account = account_repository
-        .find_account_by_id(&account_id.to_string())
-        .await
-        .map_err(|err| {
-            log_error!("account: find_account_by_id failed for {account_id}: {err}");
-            ApiError::InternalServerError("internal server error".to_owned())
-        })?
-        .ok_or_else(|| {
-            log_warn!("account: {account_id} no longer exists");
-            ApiError::NotFound("account not found".to_owned())
-        })?;
+    let account = load_account(&state, account_id).await?;
 
-    Ok(ApiResponse::ok(
-        200,
-        Vec::new(),
-        Vec::new(),
-        AccountResult {
-            id: account.id(),
-            name: account.name().to_owned(),
-            email: account.email().to_owned(),
-            is_verified: account.is_verified(),
-            created_at: account.created_at(),
-        },
-    ))
+    Ok(ApiResponse::ok(200, Vec::new(), Vec::new(), account))
 }
 
 #[cfg(test)]
@@ -109,6 +122,7 @@ mod tests {
         AuthenticatedAccount {
             id: Uuid::nil(),
             email: "ada@example.com".to_owned(),
+            session_id: "session-id".to_owned(),
         }
     }
 

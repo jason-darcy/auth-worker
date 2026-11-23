@@ -7,7 +7,11 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        repositories::{account::AccountRepository, refresh_token::RefreshTokenRepository},
+        client::ClientInfo,
+        repositories::{
+            account::AccountRepository,
+            refresh_token::{NewRefreshToken, RefreshTokenRepository},
+        },
         services::token::{IssuedTokens, TokenService},
     },
     logging::{log_error, log_info, log_warn},
@@ -62,10 +66,15 @@ impl RefreshTokensUseCase {
     }
 
     /// Rotates the refresh token: a new pair is issued and the presented token
-    /// is revoked, so a stolen refresh token is only usable once.
+    /// is retired, so a stolen refresh token is only usable once.
+    ///
+    /// Presenting an already rotated token means somebody replayed it, so the
+    /// whole session (token family) is revoked instead of only rejecting the
+    /// request.
     pub async fn execute(
         &self,
         command: RefreshTokensCommand,
+        client: &ClientInfo,
     ) -> Result<RefreshTokensResult, RefreshTokensError> {
         let token_hash = self
             .token_service
@@ -80,12 +89,23 @@ impl RefreshTokensUseCase {
             log_warn!("refresh: unknown refresh token");
             return Err(RefreshTokensError::InvalidRefreshToken);
         };
+        if let Some(rotated_at) = stored.rotated_at {
+            log_warn!(
+                "refresh: replayed refresh token of account {} (session {}), revoking the session; rotated at {rotated_at}",
+                stored.account_id,
+                stored.family_id
+            );
+            self.revoke_session(&stored.account_id, &stored.family_id)
+                .await;
+            return Err(RefreshTokensError::InvalidRefreshToken);
+        }
         if stored.expires_at <= Timestamp::now() {
             log_warn!(
                 "refresh: expired refresh token for account {}",
                 stored.account_id
             );
-            self.delete_token(&token_hash).await;
+            self.revoke_session(&stored.account_id, &stored.family_id)
+                .await;
             return Err(RefreshTokensError::InvalidRefreshToken);
         }
         let account = self
@@ -104,7 +124,8 @@ impl RefreshTokensUseCase {
                 "refresh: token references a missing account {}",
                 stored.account_id
             );
-            self.delete_token(&token_hash).await;
+            self.revoke_session(&stored.account_id, &stored.family_id)
+                .await;
             return Err(RefreshTokensError::InvalidRefreshToken);
         };
         if !account.is_verified() {
@@ -115,22 +136,36 @@ impl RefreshTokensUseCase {
         let account_id = account.id().to_string();
         let pair = self
             .token_service
-            .issue_pair(&account_id, account.email(), account.token_version())
+            .issue_pair(
+                &account_id,
+                account.email(),
+                account.token_version(),
+                &stored.family_id,
+            )
             .inspect_err(|err| {
                 log_error!("refresh: issue tokens failed for {account_id}: {err}");
             })
             .context(IssueTokensSnafu)?;
         let new_token_hash = self.token_service.hash_refresh_token(&pair.refresh_token);
-        // Store the new token before revoking the old one: a failed insert must
-        // not leave the client without a usable refresh token.
+        // The rotation keeps the old row (marked as rotated) so a replay is
+        // detectable, and stores the successor in the same transaction.
         self.refresh_token_repository
-            .create_token(&account_id, &new_token_hash, pair.refresh_expires_at)
+            .rotate_token(
+                &token_hash,
+                NewRefreshToken {
+                    account_id: account_id.clone(),
+                    token_hash: new_token_hash,
+                    family_id: stored.family_id,
+                    expires_at: pair.refresh_expires_at,
+                    user_agent: client.user_agent.clone(),
+                    ip: client.ip.clone(),
+                },
+            )
             .await
             .inspect_err(|err| {
-                log_error!("refresh: store refresh token failed for {account_id}: {err}");
+                log_error!("refresh: rotate_token failed for {account_id}: {err}");
             })
             .context(StoreRefreshTokenSnafu)?;
-        self.delete_token(&token_hash).await;
 
         log_info!("refresh: rotated tokens for account {account_id}");
         Ok(RefreshTokensResult {
@@ -140,11 +175,15 @@ impl RefreshTokensUseCase {
         })
     }
 
-    /// Revocation is best-effort: the presented token was already replaced, and
-    /// it can only be used until it expires.
-    async fn delete_token(&self, token_hash: &str) {
-        if let Err(err) = self.refresh_token_repository.delete_token(token_hash).await {
-            log_error!("refresh: delete_token failed: {err}");
+    /// Revocation is best-effort: the presented token is already unusable, and
+    /// failing the request differently would leak that a replay was detected.
+    async fn revoke_session(&self, account_id: &str, session_id: &str) {
+        if let Err(err) = self
+            .refresh_token_repository
+            .delete_session(account_id, session_id)
+            .await
+        {
+            log_error!("refresh: revoking session {session_id} failed: {err}");
         }
     }
 }
@@ -162,13 +201,17 @@ mod tests {
     use crate::{
         domain::{
             account::Account,
-            repositories::{account::AccountRepository, refresh_token::StoredRefreshToken},
+            repositories::{
+                account::AccountRepository,
+                refresh_token::{NewRefreshToken, SessionInfo, StoredRefreshToken},
+            },
             services::token::{AccessTokenClaims, TokenPair},
         },
         testing::block_on,
     };
 
     const RAW_TOKEN: &str = "raw-refresh-token";
+    const FAMILY_ID: &str = "session-id";
 
     #[derive(Default)]
     struct MockAccountRepository {
@@ -228,10 +271,10 @@ mod tests {
     struct MockRefreshTokenRepository {
         stored: Option<StoredRefreshToken>,
         fail_find: bool,
-        fail_create: bool,
+        fail_rotate: bool,
         fail_delete: bool,
-        created: RefCell<Vec<(String, String, Timestamp)>>,
-        deleted: RefCell<Vec<String>>,
+        rotated: RefCell<Vec<NewRefreshToken>>,
+        deleted_sessions: RefCell<Vec<(String, String)>>,
     }
 
     impl MockRefreshTokenRepository {
@@ -248,37 +291,26 @@ mod tests {
             MockRefreshTokenRepository {
                 stored: Some(StoredRefreshToken {
                     account_id: account.id().to_string(),
+                    family_id: FAMILY_ID.to_owned(),
                     expires_at,
+                    rotated_at: None,
                 }),
                 ..Default::default()
             }
         }
 
-        fn created_tokens(&self) -> Vec<(String, String, Timestamp)> {
-            self.created.borrow().clone()
+        fn created_tokens(&self) -> Vec<NewRefreshToken> {
+            self.rotated.borrow().clone()
         }
 
-        fn deleted_tokens(&self) -> Vec<String> {
-            self.deleted.borrow().clone()
+        fn deleted_sessions(&self) -> Vec<(String, String)> {
+            self.deleted_sessions.borrow().clone()
         }
     }
 
     #[async_trait(?Send)]
     impl RefreshTokenRepository for MockRefreshTokenRepository {
-        async fn create_token(
-            &self,
-            account_id: &str,
-            token_hash: &str,
-            expires_at: Timestamp,
-        ) -> Result<(), worker::Error> {
-            if self.fail_create {
-                return Err(worker::Error::RustError("d1 insert failed".to_owned()));
-            }
-            self.created.borrow_mut().push((
-                account_id.to_owned(),
-                token_hash.to_owned(),
-                expires_at,
-            ));
+        async fn create_token(&self, _token: NewRefreshToken) -> Result<(), worker::Error> {
             Ok(())
         }
 
@@ -293,16 +325,46 @@ mod tests {
             Ok(self.stored.clone())
         }
 
-        async fn delete_token(&self, token_hash: &str) -> Result<(), worker::Error> {
+        async fn rotate_token(
+            &self,
+            old_token_hash: &str,
+            next: NewRefreshToken,
+        ) -> Result<(), worker::Error> {
+            if self.fail_rotate {
+                return Err(worker::Error::RustError("d1 insert failed".to_owned()));
+            }
+            assert_eq!(old_token_hash, format!("hash:{RAW_TOKEN}"));
+            self.rotated.borrow_mut().push(next);
+            Ok(())
+        }
+
+        async fn delete_session(
+            &self,
+            account_id: &str,
+            family_id: &str,
+        ) -> Result<bool, worker::Error> {
             if self.fail_delete {
                 return Err(worker::Error::RustError("d1 delete failed".to_owned()));
             }
-            self.deleted.borrow_mut().push(token_hash.to_owned());
-            Ok(())
+            self.deleted_sessions
+                .borrow_mut()
+                .push((account_id.to_owned(), family_id.to_owned()));
+            Ok(true)
         }
 
         async fn delete_tokens_for_account(&self, _account_id: &str) -> Result<(), worker::Error> {
             Ok(())
+        }
+
+        async fn list_sessions(
+            &self,
+            _account_id: &str,
+        ) -> Result<Vec<SessionInfo>, worker::Error> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
         }
     }
 
@@ -337,6 +399,7 @@ mod tests {
             account_id: &str,
             email: &str,
             token_version: u32,
+            _session_id: &str,
         ) -> Result<TokenPair, worker::Error> {
             if self.fail {
                 return Err(worker::Error::RustError("signing failed".to_owned()));
@@ -412,7 +475,12 @@ mod tests {
             MockRefreshTokenRepository::with_token(&account, 3600),
         );
 
-        let result = block_on(fixture.use_case().execute(command())).expect("refresh should work");
+        let result = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect("refresh should work");
 
         assert_eq!(result.id, account.id());
         assert_eq!(result.email, "ada@example.com");
@@ -423,18 +491,17 @@ mod tests {
         );
         assert_eq!(result.tokens.refresh_token, "rotated-refresh-token");
 
+        let created = fixture.refresh_tokens.created_tokens();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].account_id, account.id().to_string());
+        assert_eq!(created[0].token_hash, "hash:rotated-refresh-token");
         assert_eq!(
-            fixture.refresh_tokens.created_tokens()[0].0,
-            account.id().to_string()
+            created[0].family_id, FAMILY_ID,
+            "rotation must stay in the same session"
         );
-        assert_eq!(
-            fixture.refresh_tokens.created_tokens()[0].1,
-            "hash:rotated-refresh-token"
-        );
-        assert_eq!(
-            fixture.refresh_tokens.deleted_tokens(),
-            vec![format!("hash:{RAW_TOKEN}")],
-            "the presented refresh token must be revoked"
+        assert!(
+            fixture.refresh_tokens.deleted_sessions().is_empty(),
+            "a successful rotation must not revoke the session"
         );
     }
 
@@ -445,8 +512,12 @@ mod tests {
             MockRefreshTokenRepository::default(),
         );
 
-        let error =
-            block_on(fixture.use_case().execute(command())).expect_err("unknown token must fail");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("unknown token must fail");
 
         assert!(matches!(error, RefreshTokensError::InvalidRefreshToken));
         assert_eq!(error.to_string(), "refresh token is invalid or expired");
@@ -461,14 +532,19 @@ mod tests {
             MockRefreshTokenRepository::with_token(&account, -60),
         );
 
-        let error =
-            block_on(fixture.use_case().execute(command())).expect_err("expired token must fail");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("expired token must fail");
 
         assert!(matches!(error, RefreshTokensError::InvalidRefreshToken));
         assert!(fixture.refresh_tokens.created_tokens().is_empty());
         assert_eq!(
-            fixture.refresh_tokens.deleted_tokens(),
-            vec![format!("hash:{RAW_TOKEN}")]
+            fixture.refresh_tokens.deleted_sessions(),
+            vec![(account.id().to_string(), FAMILY_ID.to_owned())],
+            "an expired session must be revoked"
         );
     }
 
@@ -480,8 +556,12 @@ mod tests {
             MockRefreshTokenRepository::with_token(&account, 3600),
         );
 
-        let error =
-            block_on(fixture.use_case().execute(command())).expect_err("orphaned token must fail");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("orphaned token must fail");
 
         assert!(matches!(error, RefreshTokensError::InvalidRefreshToken));
         assert!(fixture.refresh_tokens.created_tokens().is_empty());
@@ -495,8 +575,12 @@ mod tests {
             MockRefreshTokenRepository::with_token(&account, 3600),
         );
 
-        let error =
-            block_on(fixture.use_case().execute(command())).expect_err("unverified must fail");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("unverified must fail");
 
         assert!(matches!(error, RefreshTokensError::EmailNotVerified));
         assert!(fixture.tokens.issued_for().is_empty());
@@ -514,8 +598,12 @@ mod tests {
             },
         );
 
-        let error = block_on(fixture.use_case().execute(command()))
-            .expect_err("lookup failure must surface");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("lookup failure must surface");
 
         assert!(matches!(error, RefreshTokensError::FindToken { .. }));
     }
@@ -531,8 +619,12 @@ mod tests {
             MockRefreshTokenRepository::with_token(&account, 3600),
         );
 
-        let error = block_on(fixture.use_case().execute(command()))
-            .expect_err("lookup failure must surface");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("lookup failure must surface");
 
         assert!(matches!(error, RefreshTokensError::FindAccount { .. }));
     }
@@ -548,12 +640,16 @@ mod tests {
             )
         };
 
-        let error = block_on(fixture.use_case().execute(command()))
-            .expect_err("issuance failure must surface");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("issuance failure must surface");
 
         assert!(matches!(error, RefreshTokensError::IssueTokens { .. }));
         assert!(
-            fixture.refresh_tokens.deleted_tokens().is_empty(),
+            fixture.refresh_tokens.created_tokens().is_empty(),
             "the presented token must stay valid when issuance fails"
         );
     }
@@ -564,41 +660,72 @@ mod tests {
         let fixture = Fixture::new(
             MockAccountRepository::with_account(&account),
             MockRefreshTokenRepository {
-                fail_create: true,
+                fail_rotate: true,
                 ..MockRefreshTokenRepository::with_token(&account, 3600)
             },
         );
 
-        let error = block_on(fixture.use_case().execute(command()))
-            .expect_err("storage failure must surface");
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("storage failure must surface");
 
         assert!(matches!(
             error,
             RefreshTokensError::StoreRefreshToken { .. }
         ));
         assert!(
-            fixture.refresh_tokens.deleted_tokens().is_empty(),
+            fixture.refresh_tokens.created_tokens().is_empty(),
             "the presented token must stay valid when the new one cannot be stored"
         );
     }
 
     #[test]
-    fn succeeds_even_when_revoking_the_old_token_fails() {
+    fn rejects_a_replayed_token_and_revokes_the_whole_session() {
         let account = account();
-        let fixture = Fixture::new(
-            MockAccountRepository::with_account(&account),
-            MockRefreshTokenRepository {
-                fail_delete: true,
-                ..MockRefreshTokenRepository::with_token(&account, 3600)
-            },
-        );
+        let mut replayed = MockRefreshTokenRepository::with_token(&account, 3600);
+        replayed.stored.as_mut().expect("stored").rotated_at = Some(Timestamp::now());
+        let fixture = Fixture::new(MockAccountRepository::with_account(&account), replayed);
 
-        let result = block_on(fixture.use_case().execute(command()));
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("a replayed token must be rejected");
+
+        assert!(matches!(error, RefreshTokensError::InvalidRefreshToken));
+        assert!(
+            fixture.refresh_tokens.created_tokens().is_empty(),
+            "a replay must not mint new tokens"
+        );
+        assert_eq!(
+            fixture.refresh_tokens.deleted_sessions(),
+            vec![(account.id().to_string(), FAMILY_ID.to_owned())],
+            "a replay must revoke every token of the session"
+        );
+        assert!(fixture.tokens.issued_for().is_empty());
+    }
+
+    #[test]
+    fn succeeds_even_when_revoking_a_broken_session_fails() {
+        let account = account();
+        let mut expired = MockRefreshTokenRepository::with_token(&account, -60);
+        expired.fail_delete = true;
+        let fixture = Fixture::new(MockAccountRepository::with_account(&account), expired);
+
+        let error = block_on(
+            fixture
+                .use_case()
+                .execute(command(), &ClientInfo::default()),
+        )
+        .expect_err("expired token must fail");
 
         assert!(
-            result.is_ok(),
-            "revocation failures must not fail the refresh"
+            matches!(error, RefreshTokensError::InvalidRefreshToken),
+            "a failed revocation must not change the response"
         );
-        assert_eq!(fixture.refresh_tokens.created_tokens().len(), 1);
     }
 }

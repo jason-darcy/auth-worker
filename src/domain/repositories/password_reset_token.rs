@@ -30,4 +30,13 @@ pub trait PasswordResetTokenRepository {
 
     /// Removes a reset token, so it cannot be replayed.
     async fn delete_token(&self, token_hash: &str) -> Result<(), Error>;
+
+    /// Seconds since the newest token of the account was created, if any.
+    ///
+    /// Used to throttle "send me another email" requests.
+    async fn seconds_since_last_token(&self, account_id: &str) -> Result<Option<i64>, Error>;
+
+    /// Deletes every token that expired before `now`. Returns how many rows
+    /// were removed.
+    async fn delete_expired(&self, now: jiff::Timestamp) -> Result<u32, Error>;
 }

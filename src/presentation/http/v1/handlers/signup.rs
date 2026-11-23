@@ -1,7 +1,6 @@
 use axum::{
     extract::State,
     http::{HeaderMap, Uri},
-    Json,
 };
 use serde::Deserialize;
 use snafu::{ensure, Snafu};
@@ -18,6 +17,7 @@ use crate::{
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING, EMAIL_BINDING},
+        utils::extract::ApiJson,
     },
 };
 
@@ -41,7 +41,7 @@ pub enum SignUpValidationError {
     EmailInvalid,
     #[snafu(display("password should be at least 8 characters"))]
     PasswordTooShort,
-    #[snafu(display("password should be at most 20 characters"))]
+    #[snafu(display("password should be at most 64 characters"))]
     PasswordTooLong,
     #[snafu(display("passwords do not match"))]
     PasswordMismatch,
@@ -104,7 +104,7 @@ pub async fn signup_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-    Json(payload): Json<SignUpPayload>,
+    ApiJson(payload): ApiJson<SignUpPayload>,
 ) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, SignUpResult>> {
     let command = SignUpCommand::try_from(payload).map_err(|err| {
         log_warn!("signup: invalid payload: {err}");
@@ -114,7 +114,10 @@ pub async fn signup_handler(
         log_error!("signup: d1 binding `{D1_BINDING}` unavailable: {err}");
         ApiError::InternalServerError("database binding is unavailable".to_owned())
     })?;
-    let hash_password_service = state.hash_password_service();
+    let hash_password_service = state.hash_password_service().map_err(|err| {
+        log_error!("signup: password hashing is misconfigured: {err}");
+        ApiError::InternalServerError("server is misconfigured".to_owned())
+    })?;
     let verification_token_repository = state.verification_token_repository().map_err(|err| {
         log_error!("signup: d1 binding `{D1_BINDING}` unavailable for verification tokens: {err}");
         ApiError::InternalServerError("database binding is unavailable".to_owned())
@@ -304,8 +307,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_password_between_8_and_20_chars() {
-        for length in [8, 12, 20] {
+    fn accepts_password_between_8_and_64_chars() {
+        for length in [8, 12, 64] {
             let password = "a".repeat(length);
             assert!(
                 SignUpCommand::try_from(payload("Ada", "ada@example.com", &password, &password))
@@ -316,15 +319,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_password_longer_than_20_chars() {
-        let password = "a".repeat(21);
+    fn rejects_password_longer_than_64_chars() {
+        let password = "a".repeat(65);
         assert!(matches!(
             validation_error(payload("Ada", "ada@example.com", &password, &password)),
             SignUpValidationError::PasswordTooLong
         ));
         assert_eq!(
             validation_error(payload("Ada", "ada@example.com", &password, &password)).to_string(),
-            "password should be at most 20 characters"
+            "password should be at most 64 characters"
         );
     }
 
@@ -373,7 +376,7 @@ mod tests {
             ),
             (
                 SignUpValidationError::PasswordTooLong,
-                "password should be at most 20 characters",
+                "password should be at most 64 characters",
             ),
             (
                 SignUpValidationError::PasswordMismatch,

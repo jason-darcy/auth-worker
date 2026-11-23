@@ -10,7 +10,7 @@ use crate::{
     logging::{log_error, log_warn},
     presentation::{
         http::error::ApiError,
-        state::{AppState, D1_BINDING},
+        state::{AppState, D1_BINDING, JWT_SECRET_SECRET},
     },
 };
 
@@ -23,6 +23,9 @@ const INVALID_TOKEN_MESSAGE: &str = "invalid or expired access token";
 pub struct AuthenticatedAccount {
     pub id: Uuid,
     pub email: String,
+    /// Refresh token family (`sid` claim) the access token belongs to. Empty for
+    /// tokens issued before sessions existed.
+    pub session_id: String,
 }
 
 /// Rejects requests without a valid `Authorization: Bearer <access_token>`
@@ -50,7 +53,15 @@ pub async fn require_auth(
         return ApiError::Unauthorized("missing bearer token".to_owned()).into_response();
     };
 
-    let claims = match state.token_service().decode_access_token(token) {
+    let token_service = match state.token_service() {
+        Ok(service) => service,
+        Err(err) => {
+            log_error!("auth: `{JWT_SECRET_SECRET}` unavailable: {err}");
+            return ApiError::InternalServerError("server is misconfigured".to_owned())
+                .into_response();
+        }
+    };
+    let claims = match token_service.decode_access_token(token) {
         Ok(claims) => claims,
         Err(err) => {
             log_warn!("auth: invalid access token: {err}");
@@ -95,6 +106,7 @@ pub async fn require_auth(
     request.extensions_mut().insert(AuthenticatedAccount {
         id,
         email: claims.email,
+        session_id: claims.sid,
     });
     next.run(request).await
 }

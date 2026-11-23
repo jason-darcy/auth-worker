@@ -1,4 +1,4 @@
-use axum::{extract::Query, extract::State};
+use axum::{extract::State, response::Response};
 use serde::Deserialize;
 use snafu::{ensure, Snafu};
 
@@ -16,13 +16,25 @@ use crate::{
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
-        utils::validation::is_valid_opaque_token,
+        utils::{
+            extract::{ApiJson, ApiQuery},
+            html::{document, html_page},
+            validation::is_valid_opaque_token,
+        },
     },
 };
+
+/// Endpoint the confirmation page posts to.
+pub const VERIFY_EMAIL_FORM_PATH: &str = "/api/v1/verify-email";
 
 #[derive(Debug, Deserialize)]
 pub struct VerifyEmailQuery {
     pub token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyEmailPayload {
+    pub token: String,
 }
 
 #[derive(Debug, Snafu)]
@@ -50,12 +62,11 @@ impl From<VerifyEmailError> for ApiError {
     }
 }
 
-impl TryFrom<VerifyEmailQuery> for VerifyEmailCommand {
+impl TryFrom<VerifyEmailPayload> for VerifyEmailCommand {
     type Error = VerifyEmailValidationError;
 
-    fn try_from(query: VerifyEmailQuery) -> Result<Self, Self::Error> {
-        let token = query.token.unwrap_or_default();
-        let token = token.trim();
+    fn try_from(payload: VerifyEmailPayload) -> Result<Self, Self::Error> {
+        let token = payload.token.trim();
         ensure!(is_valid_opaque_token(token), TokenInvalidSnafu);
 
         Ok(VerifyEmailCommand {
@@ -64,12 +75,59 @@ impl TryFrom<VerifyEmailQuery> for VerifyEmailCommand {
     }
 }
 
+/// `GET /verify-email?token=...` — the page the emailed link opens.
+///
+/// The token is **not** consumed here: mail scanners and link previews fetch
+/// every URL in a message, which would burn the token before the recipient
+/// clicks. The page posts to [`VERIFY_EMAIL_FORM_PATH`] instead.
+#[worker::send]
+pub async fn verify_email_form_handler(ApiQuery(query): ApiQuery<VerifyEmailQuery>) -> Response {
+    let token = query.token.unwrap_or_default();
+    html_page(render_form(token.trim()))
+}
+
+/// Renders the confirmation page. Only well-formed tokens are embedded, so
+/// nothing user supplied can be reflected into the page.
+pub fn render_form(token: &str) -> String {
+    let body = if is_valid_opaque_token(token) {
+        format!(
+            r#"<p>Confirm that this email address belongs to your account.</p>
+<form id="verify">
+  <button type="submit">Verify my email</button>
+</form>
+<p id="status" role="status"></p>
+<script>
+const token = "{token}";
+document.getElementById("verify").addEventListener("submit", async (event) => {{
+  event.preventDefault();
+  const status = document.getElementById("status");
+  const response = await fetch("{path}", {{
+    method: "POST",
+    headers: {{ "content-type": "application/json" }},
+    body: JSON.stringify({{ token }}),
+  }});
+  const body = await response.json();
+  status.textContent = response.ok
+    ? "Your email address is verified. You can sign in now."
+    : (body.messages || []).join(" ");
+}});
+</script>"#,
+            token = token,
+            path = VERIFY_EMAIL_FORM_PATH
+        )
+    } else {
+        "<p>This verification link is invalid or expired. Please request a new one.</p>".to_owned()
+    };
+
+    document("Verify email", &body)
+}
+
 #[worker::send]
 pub async fn verify_email_handler(
     State(state): State<AppState>,
-    Query(query): Query<VerifyEmailQuery>,
+    ApiJson(payload): ApiJson<VerifyEmailPayload>,
 ) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, VerifyEmailResult>> {
-    let command = VerifyEmailCommand::try_from(query).map_err(|err| {
+    let command = VerifyEmailCommand::try_from(payload).map_err(|err| {
         log_warn!("verify_email: invalid token format: {err}");
         ApiError::from(err)
     })?;
@@ -107,15 +165,15 @@ pub async fn verify_email_handler(
 mod tests {
     use super::*;
 
-    fn query(token: Option<&str>) -> VerifyEmailQuery {
-        VerifyEmailQuery {
-            token: token.map(str::to_owned),
+    fn payload(token: &str) -> VerifyEmailPayload {
+        VerifyEmailPayload {
+            token: token.to_owned(),
         }
     }
 
-    fn validation_error(query: VerifyEmailQuery) -> VerifyEmailValidationError {
-        match VerifyEmailCommand::try_from(query) {
-            Ok(_) => panic!("query should be rejected"),
+    fn validation_error(payload: VerifyEmailPayload) -> VerifyEmailValidationError {
+        match VerifyEmailCommand::try_from(payload) {
+            Ok(_) => panic!("payload should be rejected"),
             Err(err) => err,
         }
     }
@@ -126,8 +184,8 @@ mod tests {
 
     #[test]
     fn accepts_a_well_formed_token() {
-        let command = VerifyEmailCommand::try_from(query(Some(&valid_token())))
-            .expect("query should be accepted");
+        let command = VerifyEmailCommand::try_from(payload(&valid_token()))
+            .expect("payload should be accepted");
 
         assert_eq!(command.token, valid_token());
     }
@@ -136,23 +194,48 @@ mod tests {
     fn trims_the_token() {
         let padded = format!("  {}  ", valid_token());
         let command =
-            VerifyEmailCommand::try_from(query(Some(&padded))).expect("query should be accepted");
+            VerifyEmailCommand::try_from(payload(&padded)).expect("payload should be accepted");
 
         assert_eq!(command.token, valid_token());
     }
 
     #[test]
-    fn rejects_missing_or_malformed_tokens() {
-        for token in [None, Some(""), Some("not-a-token"), Some("abc")] {
+    fn rejects_empty_or_malformed_tokens() {
+        for token in ["", "not-a-token", "abc", "z".repeat(64).as_str()] {
             assert!(matches!(
-                validation_error(query(token)),
+                validation_error(payload(token)),
                 VerifyEmailValidationError::TokenInvalid
             ));
         }
         assert_eq!(
-            validation_error(query(None)).to_string(),
+            validation_error(payload("")).to_string(),
             "verification token is invalid"
         );
+    }
+
+    #[test]
+    fn form_page_embeds_valid_tokens() {
+        let token = valid_token();
+        let html = render_form(&token);
+
+        assert!(html.contains(&token));
+        assert!(html.contains(VERIFY_EMAIL_FORM_PATH));
+        assert!(html.contains("type=\"submit\""));
+        assert!(
+            !html.contains("window.location"),
+            "the page must not consume the token on load"
+        );
+    }
+
+    #[test]
+    fn form_page_does_not_reflect_invalid_tokens() {
+        for token in ["", "<script>alert(1)</script>", "abc"] {
+            let html = render_form(token);
+
+            assert!(!html.contains("<script>alert(1)</script>"));
+            assert!(html.contains("invalid or expired"));
+            assert!(!html.contains("Verify my email"));
+        }
     }
 
     #[test]

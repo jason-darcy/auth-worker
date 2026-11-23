@@ -6,6 +6,7 @@ use snafu::{ensure, ResultExt, Snafu};
 use uuid::Uuid;
 
 use crate::{
+    application::use_cases::verification_email::VerificationEmailSender,
     domain::{
         account::{normalize_email, Account},
         repositories::{
@@ -125,43 +126,16 @@ impl SignUpUseCase {
     /// Verification is best-effort on purpose: the account is already created
     /// at this point, so a broken token store or email binding must not turn a
     /// successful signup into an error (it would also make retries fail with
-    /// `email already exists`). Failures are logged so they can be retried by a
-    /// future "resend verification email" endpoint.
+    /// `email already exists`). The user can ask for another link through
+    /// `POST /resend-verification`.
     async fn send_verification_email(&self, result: &SignUpResult) {
-        let token = match self.verification_token_service.generate() {
-            Ok(token) => token,
-            Err(err) => {
-                log_error!(
-                    "signup: failed to generate verification token for {}: {err}",
-                    result.email
-                );
-                return;
-            }
-        };
-        let expires_at = Timestamp::now()
-            .saturating_add(VERIFICATION_TOKEN_TTL)
-            .unwrap_or(Timestamp::MAX);
-        if let Err(err) = self
-            .verification_token_repository
-            .create_token(&result.id.to_string(), &token.hash, expires_at)
-            .await
-        {
-            log_error!(
-                "signup: failed to store verification token for {}: {err}",
-                result.email
-            );
-            return;
-        }
-        if let Err(err) = self
-            .email_service
-            .send_verification_email(&result.email, &result.name, &token.raw)
-            .await
-        {
-            log_error!(
-                "signup: failed to send verification email to {}: {err}",
-                result.email
-            );
-        }
+        VerificationEmailSender::new(
+            self.verification_token_repository.clone(),
+            self.verification_token_service.clone(),
+            self.email_service.clone(),
+        )
+        .send(&result.id.to_string(), &result.email, &result.name)
+        .await;
     }
 }
 
@@ -183,9 +157,8 @@ mod tests {
                 verification_token::{StoredVerificationToken, VerificationTokenRepository},
             },
             services::{
-                email::EmailService,
-                hash_password::HashPasswordService,
-                verification_token::{VerificationToken, VerificationTokenService},
+                email::EmailService, hash_password::HashPasswordService,
+                opaque_token::OpaqueTokenService, verification_token::VerificationToken,
             },
         },
         testing::block_on,
@@ -239,6 +212,21 @@ mod tests {
         async fn delete_token(&self, _token_hash: &str) -> Result<(), worker::Error> {
             Ok(())
         }
+
+        async fn delete_tokens_for_account(&self, _account_id: &str) -> Result<(), worker::Error> {
+            Ok(())
+        }
+
+        async fn seconds_since_last_token(
+            &self,
+            _account_id: &str,
+        ) -> Result<Option<i64>, worker::Error> {
+            Ok(None)
+        }
+
+        async fn delete_expired(&self, _now: Timestamp) -> Result<u32, worker::Error> {
+            Ok(0)
+        }
     }
 
     struct MockVerificationTokenService {
@@ -269,7 +257,7 @@ mod tests {
         }
     }
 
-    impl VerificationTokenService for MockVerificationTokenService {
+    impl OpaqueTokenService for MockVerificationTokenService {
         fn generate(&self) -> Result<VerificationToken, worker::Error> {
             *self.generated.borrow_mut() += 1;
             self.token.clone().map_err(worker::Error::RustError)
@@ -451,6 +439,8 @@ mod tests {
         fn verify(&self, _password: &str, _password_hash: &str) -> Result<bool, PasswordHashError> {
             Ok(false)
         }
+
+        fn verify_dummy(&self, _password: &str) {}
     }
 
     fn command() -> SignUpCommand {

@@ -1,10 +1,38 @@
-use axum::http::{HeaderMap, Uri};
+use axum::http::{header::USER_AGENT, HeaderMap, Uri};
 
-use crate::logging::log_warn;
+use crate::{domain::client::ClientInfo, logging::log_warn};
 
 /// Local development server (`cf dev`).
 pub const DEFAULT_APP_BASE_URL: &str = "http://localhost:8787";
+/// Cloudflare sets this on every request that reaches a Worker.
 pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
+/// Fallback for local development, where `cf-connecting-ip` is absent.
+pub const FORWARDED_FOR_HEADER: &str = "x-forwarded-for";
+/// Longest user agent stored with a session; anything longer is truncated.
+pub const MAX_USER_AGENT_LEN: usize = 256;
+
+/// Best-effort client metadata stored with a session.
+pub fn client_info(headers: &HeaderMap) -> ClientInfo {
+    ClientInfo {
+        user_agent: headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.chars().take(MAX_USER_AGENT_LEN).collect())
+            .filter(|value: &String| !value.trim().is_empty()),
+        ip: client_ip(headers),
+    }
+}
+
+/// Client address, preferring the Cloudflare header over the forwarded chain.
+pub fn client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(CLIENT_IP_HEADER)
+        .or_else(|| headers.get(FORWARDED_FOR_HEADER))
+        .and_then(|value| value.to_str().ok())
+        // `x-forwarded-for` may contain a chain: the first entry is the client.
+        .map(|value| value.split(',').next().unwrap_or(value).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
 /// Resolves the public base URL used to build links inside emails.
 ///

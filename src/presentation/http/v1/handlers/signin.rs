@@ -1,9 +1,12 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, http::HeaderMap};
 use serde::Deserialize;
 use snafu::{ensure, Snafu};
 
 use crate::{
-    application::use_cases::signin::{SignInCommand, SignInError, SignInResult, SignInUseCase},
+    application::use_cases::{
+        session::SessionIssuer,
+        signin::{SignInCommand, SignInError, SignInOutcome, SignInUseCase},
+    },
     logging::{log_error, log_info, log_warn},
     presentation::{
         http::{
@@ -14,6 +17,7 @@ use crate::{
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
+        utils::{extract::ApiJson, request::client_info},
     },
 };
 
@@ -46,8 +50,9 @@ impl From<SignInError> for ApiError {
             SignInError::EmailNotVerified => ApiError::Forbidden(err.to_string()),
             SignInError::FindAccount { .. }
             | SignInError::VerifyPassword { .. }
-            | SignInError::IssueTokens { .. }
-            | SignInError::StoreRefreshToken { .. } => {
+            | SignInError::FindMfaCredential { .. }
+            | SignInError::CreateChallenge { .. }
+            | SignInError::IssueSession { .. } => {
                 ApiError::InternalServerError("internal server error".to_owned())
             }
         }
@@ -76,8 +81,9 @@ impl TryFrom<SignInPayload> for SignInCommand {
 #[worker::send]
 pub async fn signin_handler(
     State(state): State<AppState>,
-    Json(payload): Json<SignInPayload>,
-) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, SignInResult>> {
+    headers: HeaderMap,
+    ApiJson(payload): ApiJson<SignInPayload>,
+) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, SignInOutcome>> {
     let command = SignInCommand::try_from(payload).map_err(|err| {
         log_warn!("signin: invalid payload: {err}");
         ApiError::from(err)
@@ -86,36 +92,56 @@ pub async fn signin_handler(
         log_error!("signin: d1 binding `{D1_BINDING}` unavailable: {err}");
         ApiError::InternalServerError("database binding is unavailable".to_owned())
     })?;
-    let hash_password_service = state.hash_password_service();
+    let hash_password_service = state.hash_password_service().map_err(|err| {
+        log_error!("signin: password hashing is misconfigured: {err}");
+        ApiError::InternalServerError("server is misconfigured".to_owned())
+    })?;
     let refresh_token_repository = state.refresh_token_repository().map_err(|err| {
         log_error!("signin: d1 binding `{D1_BINDING}` unavailable for refresh tokens: {err}");
         ApiError::InternalServerError("database binding is unavailable".to_owned())
     })?;
-    let token_service = state.token_service();
+    let token_service = state.token_service().map_err(|err| {
+        log_error!("signin: token signing is misconfigured: {err}");
+        ApiError::InternalServerError("server is misconfigured".to_owned())
+    })?;
+    let mfa_repository = state.mfa_repository().map_err(|err| {
+        log_error!("signin: mfa storage is misconfigured: {err}");
+        ApiError::InternalServerError("server is misconfigured".to_owned())
+    })?;
     let case = SignInUseCase::new(
         account_repository,
         hash_password_service,
-        refresh_token_repository,
-        token_service,
+        mfa_repository,
+        state.opaque_token_service(),
+        SessionIssuer::new(refresh_token_repository, token_service),
     );
-    let result = match case.execute(command).await {
-        Ok(result) => result,
+    let outcome = match case.execute(command, &client_info(&headers)).await {
+        Ok(outcome) => outcome,
         Err(err) => {
             log_error!("signin: failed: {err}");
             return Err(ApiError::from(err));
         }
     };
-    log_info!("signin: success, account id {}", result.id);
+
+    let message = match &outcome {
+        SignInOutcome::SignedIn(result) => {
+            log_info!("signin: success, account id {}", result.id);
+            "signin successful"
+        }
+        SignInOutcome::MfaRequired(_) => "second factor required",
+    };
     Ok(ApiResponse::ok(
         200,
         Vec::new(),
-        vec!["signin successful".to_owned()],
-        result,
+        vec![message.to_owned()],
+        outcome,
     ))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::application::use_cases::signin::SignInResult;
+
     use super::*;
 
     fn payload(email: &str, password: &str) -> SignInPayload {
@@ -230,10 +256,13 @@ mod tests {
             SignInError::VerifyPassword {
                 source: argon2::password_hash::Error::Crypto,
             },
-            SignInError::IssueTokens {
+            SignInError::IssueSession {
                 source: worker::Error::RustError("signing failed".to_owned()),
             },
-            SignInError::StoreRefreshToken {
+            SignInError::FindMfaCredential {
+                source: worker::Error::RustError("d1 select failed".to_owned()),
+            },
+            SignInError::CreateChallenge {
                 source: worker::Error::RustError("d1 insert failed".to_owned()),
             },
         ];
@@ -250,6 +279,8 @@ mod tests {
 #[cfg(test)]
 mod response_tests {
     use axum::response::IntoResponse;
+
+    use crate::application::use_cases::signin::SignInResult;
 
     use super::*;
 

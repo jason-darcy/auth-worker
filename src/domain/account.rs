@@ -15,11 +15,22 @@ pub struct Account {
     /// were issued with and are rejected once it changes.
     #[serde(default)]
     token_version: u32,
+    /// Consecutive failed sign-ins since the last successful one.
+    #[serde(default)]
+    failed_login_attempts: u32,
+    /// Sign-in is refused until this instant (brute-force protection).
+    #[serde(default, with = "jiff::fmt::serde::timestamp::second::optional")]
+    locked_until: Option<Timestamp>,
     #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
     created_at: Timestamp,
     #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
     updated_at: Timestamp,
 }
+
+/// Consecutive failed sign-ins that lock the account.
+pub const MAX_FAILED_LOGIN_ATTEMPTS: u32 = 10;
+/// How long an account stays locked once the limit is reached.
+pub const LOGIN_LOCKOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Canonical form of an email address.
 ///
@@ -38,6 +49,8 @@ impl Account {
             password_hash: password_hash.to_owned(),
             is_verified: false,
             token_version: 0,
+            failed_login_attempts: 0,
+            locked_until: None,
             created_at: Timestamp::now(),
             updated_at: Timestamp::now(),
         }
@@ -59,6 +72,39 @@ impl Account {
     }
     pub fn token_version(&self) -> u32 {
         self.token_version
+    }
+    pub fn failed_login_attempts(&self) -> u32 {
+        self.failed_login_attempts
+    }
+    pub fn locked_until(&self) -> Option<Timestamp> {
+        self.locked_until
+    }
+    /// `true` while the account is locked out of signing in.
+    pub fn is_locked(&self, now: Timestamp) -> bool {
+        self.locked_until.is_some_and(|until| until > now)
+    }
+    /// Records a failed sign-in and locks the account once the limit is hit.
+    ///
+    /// Returns `true` when this attempt locked the account, so the caller can
+    /// log it.
+    pub fn register_failed_login(&mut self, now: Timestamp) -> bool {
+        self.failed_login_attempts = self.failed_login_attempts.saturating_add(1);
+        self.updated_at = now;
+        if self.failed_login_attempts < MAX_FAILED_LOGIN_ATTEMPTS {
+            return false;
+        }
+        self.failed_login_attempts = 0;
+        self.locked_until = Some(now.saturating_add(LOGIN_LOCKOUT).unwrap_or(Timestamp::MAX));
+        true
+    }
+    /// Clears the failure counter after a successful sign-in.
+    pub fn reset_failed_logins(&mut self) {
+        if self.failed_login_attempts == 0 && self.locked_until.is_none() {
+            return;
+        }
+        self.failed_login_attempts = 0;
+        self.locked_until = None;
+        self.updated_at = Timestamp::now();
     }
     /// Invalidates every access token issued so far.
     pub fn bump_token_version(&mut self) {
@@ -135,6 +181,80 @@ mod tests {
         assert_eq!(normalize_email("  Ada@Example.COM "), "ada@example.com");
         assert_eq!(normalize_email("ada@example.com"), "ada@example.com");
         assert_eq!(normalize_email(""), "");
+    }
+
+    #[test]
+    fn locks_the_account_after_the_configured_number_of_failures() {
+        let mut account = Account::new("Ada Lovelace", "ada@example.com", "hashed");
+        let now = Timestamp::now();
+
+        for attempt in 1..MAX_FAILED_LOGIN_ATTEMPTS {
+            assert!(
+                !account.register_failed_login(now),
+                "attempt {attempt} must not lock the account"
+            );
+            assert_eq!(account.failed_login_attempts(), attempt);
+            assert!(!account.is_locked(now));
+        }
+
+        assert!(account.register_failed_login(now));
+        assert_eq!(
+            account.failed_login_attempts(),
+            0,
+            "the counter restarts once the lock is set"
+        );
+        assert!(account.is_locked(now));
+        assert_eq!(
+            account.locked_until(),
+            Some(now.saturating_add(LOGIN_LOCKOUT).expect("timestamp"))
+        );
+    }
+
+    #[test]
+    fn the_lock_expires() {
+        let mut account = Account::new("Ada Lovelace", "ada@example.com", "hashed");
+        let now = Timestamp::now();
+        for _ in 0..MAX_FAILED_LOGIN_ATTEMPTS {
+            account.register_failed_login(now);
+        }
+
+        let later = now
+            .saturating_add(LOGIN_LOCKOUT)
+            .expect("timestamp")
+            .saturating_add(std::time::Duration::from_secs(1))
+            .expect("timestamp");
+
+        assert!(!account.is_locked(later));
+    }
+
+    #[test]
+    fn resets_failed_logins() {
+        let mut account = Account::new("Ada Lovelace", "ada@example.com", "hashed");
+        let now = Timestamp::now();
+        account.register_failed_login(now);
+
+        account.reset_failed_logins();
+
+        assert_eq!(account.failed_login_attempts(), 0);
+        assert!(account.locked_until().is_none());
+        assert!(!account.is_locked(now));
+    }
+
+    #[test]
+    fn deserializes_missing_lockout_columns_as_defaults() {
+        let row = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "Ada Lovelace",
+            "email": "ada@example.com",
+            "password_hash": "hashed",
+            "is_verified": 1,
+            "created_at": 1767323045,
+            "updated_at": 1767323045,
+        });
+        let account: Account = serde_json::from_value(row).expect("row should deserialize");
+
+        assert_eq!(account.failed_login_attempts(), 0);
+        assert!(account.locked_until().is_none());
     }
 
     #[test]

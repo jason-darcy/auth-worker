@@ -1,9 +1,4 @@
-use axum::{
-    extract::{Query, State},
-    http::header,
-    response::{Html, IntoResponse, Response},
-    Json,
-};
+use axum::{extract::State, response::Response};
 use serde::Deserialize;
 use snafu::{ensure, Snafu};
 
@@ -21,7 +16,11 @@ use crate::{
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
-        utils::validation::{is_valid_opaque_token, PASSWORD_MAX_LEN, PASSWORD_MIN_LEN},
+        utils::{
+            extract::{ApiJson, ApiQuery},
+            html::{document, html_page},
+            validation::{is_valid_opaque_token, PASSWORD_MAX_LEN, PASSWORD_MIN_LEN},
+        },
     },
 };
 
@@ -45,7 +44,7 @@ pub enum ResetPasswordValidationError {
     TokenInvalid,
     #[snafu(display("password should be at least 8 characters"))]
     PasswordTooShort,
-    #[snafu(display("password should be at most 20 characters"))]
+    #[snafu(display("password should be at most 64 characters"))]
     PasswordTooLong,
     #[snafu(display("passwords do not match"))]
     PasswordMismatch,
@@ -101,7 +100,7 @@ impl TryFrom<ResetPasswordPayload> for ResetPasswordCommand {
 #[worker::send]
 pub async fn reset_password_handler(
     State(state): State<AppState>,
-    Json(payload): Json<ResetPasswordPayload>,
+    ApiJson(payload): ApiJson<ResetPasswordPayload>,
 ) -> ApiResult<ApiResponse<Vec<String>, Vec<String>, ResetPasswordResult>> {
     let command = ResetPasswordCommand::try_from(payload).map_err(|err| {
         log_warn!("reset_password: invalid payload: {err}");
@@ -120,11 +119,15 @@ pub async fn reset_password_handler(
         log_error!("reset_password: d1 binding `{D1_BINDING}` unavailable for sessions: {err}");
         ApiError::InternalServerError("database binding is unavailable".to_owned())
     })?;
+    let hash_password_service = state.hash_password_service().map_err(|err| {
+        log_error!("reset_password: password hashing is misconfigured: {err}");
+        ApiError::InternalServerError("server is misconfigured".to_owned())
+    })?;
     let case = ResetPasswordUseCase::new(
         account_repository,
         password_reset_token_repository,
         refresh_token_repository,
-        state.hash_password_service(),
+        hash_password_service,
         state.verification_token_service(),
     );
     let result = match case.execute(command).await {
@@ -148,14 +151,11 @@ pub async fn reset_password_handler(
 /// It is a tiny form that posts JSON to the API, so the flow works without a
 /// separate frontend. Replace it with your own page when you have one.
 #[worker::send]
-pub async fn reset_password_form_handler(Query(query): Query<ResetPasswordQuery>) -> Response {
+pub async fn reset_password_form_handler(
+    ApiQuery(query): ApiQuery<ResetPasswordQuery>,
+) -> Response {
     let token = query.token.unwrap_or_default();
-    let html = render_form(token.trim());
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        Html(html),
-    )
-        .into_response()
+    html_page(render_form(token.trim()))
 }
 
 /// Renders the reset form. Only well-formed tokens are embedded, so nothing
@@ -166,8 +166,8 @@ pub fn render_form(token: &str) -> String {
         format!(
             r#"<p>Choose a new password for your account.</p>
 <form id="reset">
-  <label>New password <input type="password" id="password" minlength="8" maxlength="20" required></label>
-  <label>Confirm password <input type="password" id="confirm_password" minlength="8" maxlength="20" required></label>
+  <label>New password <input type="password" id="password" minlength="8" maxlength="64" required></label>
+  <label>Confirm password <input type="password" id="confirm_password" minlength="8" maxlength="64" required></label>
   <button type="submit">Reset password</button>
 </form>
 <p id="status" role="status"></p>
@@ -199,20 +199,7 @@ document.getElementById("reset").addEventListener("submit", async (event) => {{
             .to_owned()
     };
 
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reset password</title>
-</head>
-<body>
-<h1>Reset password</h1>
-{body}
-</body>
-</html>"#
-    )
+    document("Reset password", &body)
 }
 
 #[cfg(test)]
@@ -297,7 +284,7 @@ mod tests {
             ),
             (
                 ResetPasswordValidationError::PasswordTooLong,
-                "password should be at most 20 characters",
+                "password should be at most 64 characters",
             ),
             (
                 ResetPasswordValidationError::PasswordMismatch,

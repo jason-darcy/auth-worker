@@ -55,6 +55,7 @@ impl TokenService for JwtTokenService {
         account_id: &str,
         email: &str,
         token_version: u32,
+        session_id: &str,
     ) -> Result<TokenPair, worker::Error> {
         let now = Timestamp::now();
         let access_expires_at = now
@@ -66,6 +67,7 @@ impl TokenService for JwtTokenService {
         let claims = AccessTokenClaims {
             sub: account_id.to_owned(),
             email: email.to_owned(),
+            sid: session_id.to_owned(),
             typ: ACCESS_TOKEN_TYPE.to_owned(),
             iss: TOKEN_ISSUER.to_owned(),
             aud: TOKEN_AUDIENCE.to_owned(),
@@ -122,7 +124,7 @@ mod tests {
     #[test]
     fn issues_a_decodable_access_token() {
         let pair = service()
-            .issue_pair("account-1", "ada@example.com", 3)
+            .issue_pair("account-1", "ada@example.com", 3, "session-1")
             .expect("tokens should be issued");
 
         let claims = service()
@@ -143,7 +145,7 @@ mod tests {
     fn access_token_expires_in_fifteen_minutes_by_default() {
         let before = Timestamp::now().as_second();
         let pair = service()
-            .issue_pair("account-1", "ada@example.com", 0)
+            .issue_pair("account-1", "ada@example.com", 0, "session-1")
             .expect("tokens should be issued");
 
         let access_ttl = pair.access_expires_at.as_second() - before;
@@ -158,10 +160,10 @@ mod tests {
     #[test]
     fn issues_an_opaque_refresh_token_that_is_stored_hashed() {
         let pair = service()
-            .issue_pair("account-1", "ada@example.com", 0)
+            .issue_pair("account-1", "ada@example.com", 0, "session-1")
             .expect("tokens should be issued");
         let other = service()
-            .issue_pair("account-1", "ada@example.com", 0)
+            .issue_pair("account-1", "ada@example.com", 0, "session-1")
             .expect("tokens should be issued");
 
         assert_ne!(pair.refresh_token, other.refresh_token);
@@ -180,7 +182,7 @@ mod tests {
     #[test]
     fn rejects_tokens_signed_with_another_secret() {
         let pair = JwtTokenService::new("other-secret")
-            .issue_pair("account-1", "ada@example.com", 0)
+            .issue_pair("account-1", "ada@example.com", 0, "session-1")
             .expect("tokens should be issued");
 
         assert!(service().decode_access_token(&pair.access_token).is_err());
@@ -191,6 +193,7 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: "account-1".to_owned(),
             email: "ada@example.com".to_owned(),
+            sid: "session-1".to_owned(),
             typ: ACCESS_TOKEN_TYPE.to_owned(),
             iss: TOKEN_ISSUER.to_owned(),
             aud: TOKEN_AUDIENCE.to_owned(),
@@ -213,6 +216,7 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: "account-1".to_owned(),
             email: "ada@example.com".to_owned(),
+            sid: "session-1".to_owned(),
             typ: "refresh".to_owned(),
             iss: TOKEN_ISSUER.to_owned(),
             aud: TOKEN_AUDIENCE.to_owned(),

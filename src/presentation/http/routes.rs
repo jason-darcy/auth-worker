@@ -1,14 +1,33 @@
-use axum::{middleware, Router};
+use axum::{extract::DefaultBodyLimit, middleware, Router};
 
 use crate::presentation::{
-    http::v1::routes::{
-        account::account_router, forgot_password::forgot_password_router, health::health_router,
-        refresh_tokens::refresh_tokens_router, reset_password::reset_password_router,
-        signin::signin_router, signup::signup_router, verify_email::verify_email_router,
+    http::{
+        error::ApiError,
+        v1::routes::{
+            account::account_router,
+            change_password::change_password_router,
+            forgot_password::forgot_password_router,
+            health::health_router,
+            mfa::{mfa_router, mfa_verify_router},
+            openapi::openapi_router,
+            refresh_tokens::refresh_tokens_router,
+            resend_verification::resend_verification_router,
+            reset_password::reset_password_router,
+            sessions::sessions_router,
+            signin::signin_router,
+            signout::signout_all_router,
+            signout::signout_router,
+            signup::signup_router,
+            verify_email::verify_email_router,
+        },
     },
-    middlewares::{auth::require_auth, rate_limit::rate_limit},
+    middlewares::{auth::require_auth, cache::no_store, cors::cors_layer, rate_limit::rate_limit},
     state::AppState,
 };
+
+/// Auth payloads are a few hundred bytes; anything larger is a client bug or an
+/// attempt to make the worker buffer memory.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 pub fn create_routers(state: AppState) -> Router<()> {
     // Only the auth endpoints are rate limited: health checks must stay
@@ -20,16 +39,85 @@ pub fn create_routers(state: AppState) -> Router<()> {
         .merge(forgot_password_router())
         .merge(reset_password_router())
         .merge(verify_email_router())
+        .merge(resend_verification_router())
+        .merge(mfa_verify_router())
+        .merge(signout_router())
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit));
 
     // Protected resources: require `Authorization: Bearer <access_token>`.
     let protected_routes = Router::new()
         .merge(account_router())
+        .merge(change_password_router())
+        .merge(sessions_router())
+        .merge(mfa_router())
+        .merge(signout_all_router())
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let v1_routes = Router::new()
         .merge(health_router())
+        .merge(openapi_router())
         .merge(auth_routes)
         .merge(protected_routes);
-    Router::new().nest("/api/v1", v1_routes).with_state(state)
+
+    // Unknown paths and wrong methods keep the documented response envelope
+    // instead of axum's empty-bodied defaults.
+    let app = Router::new()
+        .nest("/api/v1", v1_routes)
+        .with_state(state.clone())
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn(no_store));
+
+    // CORS is opt-in: without `CORS_ORIGINS` no layer is added at all, so the
+    // service stays same-origin only and OPTIONS is not intercepted.
+    match cors_layer(&state) {
+        Some(cors) => app.layer(cors),
+        None => app,
+    }
+}
+
+async fn not_found() -> ApiError {
+    ApiError::NotFound("route not found".to_owned())
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::MethodNotAllowed("method not allowed".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::response::IntoResponse;
+
+    use super::*;
+    use crate::testing::block_on;
+
+    #[test]
+    fn unknown_routes_answer_with_the_api_envelope() {
+        let error = block_on(not_found());
+
+        assert_eq!(error.status(), 404);
+        assert_eq!(error.message(), "route not found");
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn wrong_methods_answer_with_the_api_envelope() {
+        let error = block_on(method_not_allowed());
+
+        assert_eq!(error.status(), 405);
+        assert_eq!(error.message(), "method not allowed");
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[test]
+    fn body_limit_stays_small_enough_for_auth_payloads() {
+        assert_eq!(MAX_BODY_BYTES, 64 * 1024);
+    }
 }

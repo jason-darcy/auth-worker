@@ -1,5 +1,7 @@
 pub const PASSWORD_MIN_LEN: usize = 8;
-pub const PASSWORD_MAX_LEN: usize = 20;
+/// Long enough for passphrases and password-manager output; the upper bound
+/// only exists so a request cannot force an unbounded Argon2 input.
+pub const PASSWORD_MAX_LEN: usize = 64;
 
 /// Opaque tokens (email verification, password reset, refresh) are 32 random
 /// bytes hex-encoded.
