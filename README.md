@@ -8,6 +8,8 @@ The best way to deploy on your cloudflare woker is clicking the button.
 
 ## Configuration (Only when you want to develop or deploy locally)
 
+Install [mise](https://mise.jdx.dev/installing-mise.html) on your device
+
 ```sh
 mise bootstrap
 ```

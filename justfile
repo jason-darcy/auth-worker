@@ -10,3 +10,13 @@ migrate:
 
 deploy: migrate
     cf deploy --secrets-file .env
+
+test:
+    cargo test --workspace --all-features --locked
+
+fmt:
+    cargo fmt
+
+check:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-features --locked -- -D warnings

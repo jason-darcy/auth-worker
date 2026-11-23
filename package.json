@@ -3,12 +3,8 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-  "scripts": {
-    "deploy": "wrangler d1 migrations apply auth-worker --remote && wrangler deploy",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
+  "keywords": ["workers-rs", "auth"],
+  "author": "Jason Darcy <notnone@homeryland.com>",
   "license": "MIT",
   "devEngines": {
     "packageManager": {

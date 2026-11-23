@@ -7,6 +7,7 @@ import { bindings, defineConfig } from "cf/config";
 
 const domain = process.env.DOMAIN?.trim();
 const dbUuid = process.env.DB_UUID?.trim();
+const emailFrom = process.env.EMAIL_FROM?.trim() || "no-reply@example.com";
 
 export default defineConfig(() => {
   return {
@@ -29,9 +30,17 @@ export default defineConfig(() => {
       },
       env: {
         PASSWORD_PEPPER: bindings.secret(),
+        JWT_SECRET: bindings.secret(),
         "auth-worker": bindings.d1({
           name: "auth-worker",
           ...(dbUuid ? { id: dbUuid } : {}),
+        }),
+        EMAIL: bindings.sendEmail({}),
+        EMAIL_FROM: bindings.text(emailFrom),
+        DOMAIN: bindings.text(domain ?? ""),
+        RATE_LIMITER: bindings.rateLimit({
+          namespace: "auth-worker",
+          simple: { limit: 10, period: 60 },
         }),
       },
     },

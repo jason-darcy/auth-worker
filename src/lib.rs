@@ -6,7 +6,11 @@ use crate::presentation::{http::routes::create_routers, state::AppState};
 pub mod application;
 pub mod domain;
 pub mod infrastructure;
+mod logging;
 pub mod presentation;
+
+#[cfg(test)]
+mod testing;
 
 #[event(fetch)]
 async fn fetch(

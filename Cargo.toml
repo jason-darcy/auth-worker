@@ -14,16 +14,17 @@ codegen-units = 1
 [dependencies]
 worker = { version = "0.9", features = ['http', 'axum', 'd1'] }
 worker-macros = { version = "0.9", features = ['http'] }
-axum = { version = "0.8", default-features = false, features = ['json'] }
+axum = { version = "0.8", default-features = false, features = ['json', 'query'] }
 tower-service = { version = "0.3.3" }
 async-trait = { version = "0.1.92" }
 serde = { version = "1.0.229", features = ['derive'] }
-argon2 = { version = "0.6.0" }
+getrandom = { version = "0.4.3", features = ['wasm_js'] }
+argon2 = { version = "0.6.0" } # argon2 need getrandom features['wasm_js'], or it can't work
 snafu = { version = "0.9.2" }
-uuid = { version = "1.29.3", features = ['serde', 'v7'] }
-jiff = { version = "1.0.1", features = ['serde'] }
+uuid = { version = "1.29.3", features = ['serde', 'v7', 'js'] }
+jiff = { version = "1.0.1", features = ['serde', 'js'] }
+sha2 = { version = "0.10.9" }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["rust_crypto"] }
 
-[target.wasm32-unknown-unknown.dependencies]
-getrandom = { version = "0.4", features = ['wasm_js'] }
-uuid = { version = "1.29.3", features = ['js'] }
-jiff = { version = "1.0.1", features = ['js'] }
+[dev-dependencies]
+serde_json = "1.0.145"
