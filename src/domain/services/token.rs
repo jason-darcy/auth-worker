@@ -40,14 +40,16 @@ pub struct TokenPair {
 }
 
 /// The token part of a signin/refresh response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct IssuedTokens {
     /// Always `Bearer`; clients send the access token as
     /// `Authorization: Bearer <access_token>`.
     pub token_type: String,
     pub access_token: String,
     pub refresh_token: String,
+    #[schema(value_type = String, format = DateTime)]
     pub access_token_expires_at: Timestamp,
+    #[schema(value_type = String, format = DateTime)]
     pub refresh_token_expires_at: Timestamp,
 }
 

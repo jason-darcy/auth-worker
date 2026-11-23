@@ -16,6 +16,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::{EmptyResult, Envelope},
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING, EMAIL_BINDING},
@@ -27,7 +28,7 @@ use crate::{
 pub const FORGOT_PASSWORD_MESSAGE: &str =
     "if the email is registered, a password reset link has been sent";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ForgotPasswordPayload {
     pub email: String,
 }
@@ -67,6 +68,20 @@ impl TryFrom<ForgotPasswordPayload> for ForgotPasswordCommand {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/forgot-password",
+    tag = "password",
+    summary = "Email a password reset link",
+    description = "The response is identical whether or not the email is registered. At most \
+                   one email per account per minute.",
+    request_body = ForgotPasswordPayload,
+    responses(
+        (status = 200, description = "Reset link sent when the account exists", body = Envelope<EmptyResult>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn forgot_password_handler(
     State(state): State<AppState>,

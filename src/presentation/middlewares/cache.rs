@@ -17,13 +17,15 @@ pub const NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
 ///
 /// Auth responses carry access and refresh tokens, and the server-rendered
 /// forms carry tokens in their URL; neither may be stored by a proxy or the
-/// browser. The OpenAPI document is the only exception.
+/// browser. The generated document and the Swagger UI assets may be cached, but
+/// only after revalidation, so a deploy is picked up immediately.
 pub async fn no_store(request: Request, next: Next) -> Response {
-    let is_openapi = request.uri().path().ends_with("/openapi.json");
+    let path = request.uri().path();
+    let cacheable = path.ends_with("/openapi.json") || path.starts_with("/swagger-ui");
     let mut response = next.run(request).await;
     set_cache_control(
         response.headers_mut(),
-        if is_openapi { NO_CACHE } else { NO_STORE },
+        if cacheable { NO_CACHE } else { NO_STORE },
     );
     response
 }

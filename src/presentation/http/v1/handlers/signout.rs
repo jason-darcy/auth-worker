@@ -11,6 +11,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::{EmptyResult, Envelope},
             response::ApiResponse,
         },
         middlewares::auth::AuthenticatedAccount,
@@ -24,7 +25,7 @@ use crate::{
 pub const SIGN_OUT_MESSAGE: &str = "signed out";
 pub const SIGN_OUT_ALL_MESSAGE: &str = "signed out of every device";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignOutPayload {
     pub refresh_token: String,
 }
@@ -62,6 +63,19 @@ impl TryFrom<SignOutPayload> for SignOutCommand {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/signout",
+    tag = "session",
+    summary = "Revoke the session of a refresh token",
+    description = "Idempotent: an unknown or already rotated token still answers 200.",
+    request_body = SignOutPayload,
+    responses(
+        (status = 200, description = "Signed out", body = Envelope<EmptyResult>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn signout_handler(
     State(state): State<AppState>,
@@ -97,6 +111,19 @@ pub async fn signout_handler(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/signout-all",
+    tag = "session",
+    summary = "Revoke every session of the caller",
+    description = "Also bumps the account token version, so access tokens issued so far stop working.",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Signed out everywhere", body = Envelope<EmptyResult>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn signout_all_handler(
     State(state): State<AppState>,

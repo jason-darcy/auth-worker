@@ -80,7 +80,8 @@ bodies:
 | POST | `/api/v1/mfa/disable` | Bearer | Turn MFA off; requires the password and a valid code |
 | POST | `/api/v1/mfa/recovery-codes` | Bearer | Reissue the recovery codes; requires the password and a valid code |
 | POST | `/api/v1/mfa/verify` | — | Exchange the sign-in challenge and a code for tokens |
-| GET | `/api/v1/openapi.json` | — | The OpenAPI 3.1 contract, served by the worker |
+| GET | `/api/v1/openapi.json` | — | The OpenAPI 3.1 contract, generated from the types |
+| GET | `/swagger-ui` | — | Swagger UI rendering that contract |
 
 Authenticated endpoints expect `Authorization: Bearer <access_token>`.
 
@@ -164,9 +165,29 @@ so this only reclaims space.
 ### Response headers
 
 Every API response is sent with `Cache-Control: no-store` (the OpenAPI document
-uses `no-cache`), and the server-rendered pages additionally carry
+and the Swagger UI assets use `no-cache`), and the server-rendered pages
+additionally carry
 `X-Content-Type-Options`, `Referrer-Policy: no-referrer` and a restrictive
 `Content-Security-Policy`.
+
+### API documentation
+
+The contract is generated from the Rust types by
+[`utoipa`](https://docs.rs/utoipa): every handler carries a `#[utoipa::path]`
+attribute and every request/response type derives `ToSchema`, so a handler
+change and its documentation cannot drift apart. There is no checked-in
+`openapi.json` to keep in sync.
+
+- `GET /api/v1/openapi.json` — the raw document (OpenAPI 3.1)
+- `GET /swagger-ui` — Swagger UI rendering it
+
+The UI assets are embedded in the worker via `utoipa-swagger-ui`'s `vendored`
+feature, which means a build never has to reach GitHub. The cost is size: the
+wasm grows by about 5.7 MB (1.3 MB gzipped), from ~2.5 MB to ~8.2 MB. That is
+well inside the paid plan's 10 MiB limit but a large share of the free plan's
+3 MiB. If that matters, drop the `utoipa-swagger-ui` dependency and the
+`SwaggerUi` merge in `src/presentation/http/routes.rs`; the generated document
+keeps working.
 
 ### CORS
 

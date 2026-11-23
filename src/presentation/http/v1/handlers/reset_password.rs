@@ -13,6 +13,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
@@ -26,14 +27,15 @@ use crate::{
 
 pub const RESET_PASSWORD_FORM_PATH: &str = "/api/v1/reset-password";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ResetPasswordPayload {
     pub token: String,
     pub password: String,
     pub confirm_password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ResetPasswordQuery {
     pub token: Option<String>,
 }
@@ -97,6 +99,19 @@ impl TryFrom<ResetPasswordPayload> for ResetPasswordCommand {
 }
 
 /// `POST /reset-password` — the API used by clients (and by the form page).
+#[utoipa::path(
+    post,
+    path = "/api/v1/reset-password",
+    tag = "password",
+    summary = "Set a new password with a reset token",
+    description = "Invalidates every session of the account and marks the email as verified.",
+    request_body = ResetPasswordPayload,
+    responses(
+        (status = 200, description = "Password reset", body = Envelope<ResetPasswordResult>),
+        (status = 400, description = "Invalid payload or token", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn reset_password_handler(
     State(state): State<AppState>,
@@ -150,6 +165,16 @@ pub async fn reset_password_handler(
 ///
 /// It is a tiny form that posts JSON to the API, so the flow works without a
 /// separate frontend. Replace it with your own page when you have one.
+#[utoipa::path(
+    get,
+    path = "/api/v1/reset-password",
+    tag = "password",
+    summary = "Render the password reset form",
+    description = "A minimal server-rendered form that posts to `POST /reset-password`. Only a \
+                   well-formed token is embedded in the page.",
+    params(ResetPasswordQuery),
+    responses(        (status = 200, description = "HTML form", body = String, content_type = "text/html"))
+)]
 #[worker::send]
 pub async fn reset_password_form_handler(
     ApiQuery(query): ApiQuery<ResetPasswordQuery>,

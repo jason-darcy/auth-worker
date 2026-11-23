@@ -25,28 +25,30 @@ pub struct SignInCommand {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SignInResult {
     pub id: Uuid,
     pub name: String,
     pub email: String,
+    #[schema(value_type = String, format = DateTime)]
     pub created_at: Timestamp,
     #[serde(flatten)]
     pub tokens: IssuedTokens,
 }
 
 /// Returned instead of the tokens when the account has MFA enabled.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MfaChallengeResult {
     /// Always `true`; it discriminates this shape from [`SignInResult`].
     pub mfa_required: bool,
     /// Single-use ticket for `POST /mfa/verify`.
     pub challenge_token: String,
+    #[schema(value_type = String, format = DateTime)]
     pub challenge_expires_at: Timestamp,
 }
 
 /// Either a completed sign-in or the request for the second factor.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(untagged)]
 pub enum SignInOutcome {
     SignedIn(SignInResult),

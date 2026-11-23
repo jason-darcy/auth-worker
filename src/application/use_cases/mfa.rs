@@ -91,13 +91,13 @@ impl From<SecondFactorError> for MfaError {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MfaStatusResult {
     pub enabled: bool,
     pub recovery_codes_remaining: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MfaSetupResult {
     /// Base32 secret, for manual entry when the QR code cannot be scanned.
     pub secret: String,
@@ -105,7 +105,7 @@ pub struct MfaSetupResult {
     pub otpauth_uri: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MfaConfirmResult {
     /// Plaintext codes. Shown exactly once; only hashes are stored.
     pub recovery_codes: Vec<String>,

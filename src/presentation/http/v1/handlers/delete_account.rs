@@ -13,6 +13,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::{EmptyResult, Envelope},
             response::ApiResponse,
         },
         middlewares::auth::AuthenticatedAccount,
@@ -23,7 +24,7 @@ use crate::{
 
 pub const DELETE_ACCOUNT_MESSAGE: &str = "account deleted";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct DeleteAccountPayload {
     pub password: String,
     /// Required when the account has MFA enabled.
@@ -80,6 +81,23 @@ impl DeleteAccountPayload {
 
 /// `DELETE /account/me` — permanently deletes the caller's account. The
 /// password is required so a stolen access token alone cannot destroy it.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/account/me",
+    tag = "account",
+    summary = "Permanently delete the caller's account",
+    description = "Requires the password, plus a valid `mfa_code` when the account has MFA \
+                   enabled. Every token of the account is removed by cascade.",
+    request_body = DeleteAccountPayload,
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Account deleted", body = Envelope<EmptyResult>),
+        (status = 400, description = "Invalid payload or wrong password", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing token, or a wrong MFA code", body = Envelope<Vec<String>>),
+        (status = 403, description = "MFA is enabled and no code was sent", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn delete_account_handler(
     State(state): State<AppState>,

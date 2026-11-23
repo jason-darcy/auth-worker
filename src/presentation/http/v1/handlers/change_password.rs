@@ -13,6 +13,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         middlewares::auth::AuthenticatedAccount,
@@ -26,7 +27,7 @@ use crate::{
 
 pub const CHANGE_PASSWORD_MESSAGE: &str = "password changed, please sign in again";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ChangePasswordPayload {
     pub current_password: String,
     pub new_password: String,
@@ -104,6 +105,23 @@ impl ChangePasswordPayload {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/change-password",
+    tag = "password",
+    summary = "Replace the password of the caller",
+    description = "Requires the current password, plus a valid `mfa_code` when the account has \
+                   MFA enabled. A success revokes every session, including the caller's.",
+    request_body = ChangePasswordPayload,
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Password changed; sign in again", body = Envelope<ChangePasswordResult>),
+        (status = 400, description = "Invalid payload or wrong current password", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing token, or a wrong MFA code", body = Envelope<Vec<String>>),
+        (status = 403, description = "MFA is enabled and no code was sent", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn change_password_handler(
     State(state): State<AppState>,

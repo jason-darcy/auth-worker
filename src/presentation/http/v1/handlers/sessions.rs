@@ -6,6 +6,7 @@ use crate::{
     presentation::{
         http::{
             error::{ApiError, ApiResult},
+            openapi::{EmptyResult, Envelope},
             response::ApiResponse,
         },
         middlewares::auth::AuthenticatedAccount,
@@ -32,6 +33,17 @@ fn refresh_token_repository(
 }
 
 /// `GET /sessions` — every live session of the caller, newest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/sessions",
+    tag = "session",
+    summary = "List the caller's live sessions",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Sessions, newest first", body = Envelope<Vec<SessionResult>>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn list_sessions_handler(
     State(state): State<AppState>,
@@ -53,6 +65,20 @@ pub async fn list_sessions_handler(
 }
 
 /// `DELETE /sessions/{session_id}` — revokes one session of the caller.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/sessions/{session_id}",
+    tag = "session",
+    summary = "Revoke one session of the caller",
+    params(("session_id" = String, Path, description = "Session id, as returned by `GET /sessions`")),
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Session revoked", body = Envelope<EmptyResult>),
+        (status = 400, description = "Invalid session id", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>),
+        (status = 404, description = "The session does not belong to the caller", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn revoke_session_handler(
     State(state): State<AppState>,

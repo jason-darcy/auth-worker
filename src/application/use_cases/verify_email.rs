@@ -19,7 +19,7 @@ pub struct VerifyEmailCommand {
     pub token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct VerifyEmailResult {
     pub id: Uuid,
     pub email: String,

@@ -21,6 +21,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::{EmptyResult, Envelope},
             response::ApiResponse,
         },
         middlewares::auth::AuthenticatedAccount,
@@ -67,7 +68,7 @@ impl From<MfaError> for ApiError {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MfaCodePayload {
     pub code: String,
 }
@@ -88,13 +89,13 @@ impl From<MfaValidationError> for ApiError {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MfaPasswordCodePayload {
     pub password: String,
     pub code: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MfaVerifyPayload {
     pub challenge_token: String,
     pub code: String,
@@ -198,6 +199,18 @@ fn issuer(state: &AppState) -> String {
 }
 
 /// `GET /mfa` — whether MFA is enabled and how many recovery codes are left.
+#[utoipa::path(
+    get,
+    path = "/api/v1/mfa",
+    tag = "mfa",
+    summary = "Whether MFA is enabled for the caller",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "MFA status", body = Envelope<MfaStatusResult>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn mfa_status_handler(
     State(state): State<AppState>,
@@ -216,6 +229,21 @@ pub async fn mfa_status_handler(
 }
 
 /// `POST /mfa/totp/setup` — starts an enrolment and returns the secret.
+#[utoipa::path(
+    post,
+    path = "/api/v1/mfa/totp/setup",
+    tag = "mfa",
+    summary = "Start a TOTP enrolment",
+    description = "Returns the base32 secret and the `otpauth://` URI. MFA is not enforced until a \
+                   code is confirmed, so an abandoned setup cannot lock the account out.",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Secret to scan", body = Envelope<MfaSetupResult>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>),
+        (status = 409, description = "MFA is already enabled", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn mfa_setup_handler(
     State(state): State<AppState>,
@@ -243,6 +271,22 @@ pub async fn mfa_setup_handler(
 }
 
 /// `POST /mfa/totp/confirm` — activates the enrolment, returns recovery codes.
+#[utoipa::path(
+    post,
+    path = "/api/v1/mfa/totp/confirm",
+    tag = "mfa",
+    summary = "Activate the enrolment and get recovery codes",
+    description = "The recovery codes are returned exactly once; only their hashes are stored.",
+    request_body = MfaCodePayload,
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "MFA enabled", body = Envelope<MfaConfirmResult>),
+        (status = 400, description = "Invalid payload, or no enrolment was started", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing token, or a wrong code", body = Envelope<Vec<String>>),
+        (status = 409, description = "MFA is already enabled", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn mfa_confirm_handler(
     State(state): State<AppState>,
@@ -275,6 +319,21 @@ pub async fn mfa_confirm_handler(
 }
 
 /// `POST /mfa/disable` — requires the password and a valid second factor.
+#[utoipa::path(
+    post,
+    path = "/api/v1/mfa/disable",
+    tag = "mfa",
+    summary = "Turn MFA off",
+    description = "Requires both the password and a valid second factor.",
+    request_body = MfaPasswordCodePayload,
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "MFA disabled", body = Envelope<EmptyResult>),
+        (status = 400, description = "Invalid payload, wrong password, or MFA is not enabled", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing token, or a wrong code", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn mfa_disable_handler(
     State(state): State<AppState>,
@@ -314,6 +373,22 @@ pub async fn mfa_disable_handler(
 }
 
 /// `POST /mfa/recovery-codes` — reissues the recovery codes.
+#[utoipa::path(
+    post,
+    path = "/api/v1/mfa/recovery-codes",
+    tag = "mfa",
+    summary = "Reissue the recovery codes",
+    description = "Replaces every recovery code with a fresh set. Requires the password and a \
+                   valid second factor.",
+    request_body = MfaPasswordCodePayload,
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "New recovery codes", body = Envelope<MfaConfirmResult>),
+        (status = 400, description = "Invalid payload, wrong password, or MFA is not enabled", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing token, or a wrong code", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn mfa_recovery_codes_handler(
     State(state): State<AppState>,
@@ -364,6 +439,21 @@ pub async fn mfa_recovery_codes_handler(
 }
 
 /// `POST /mfa/verify` — exchanges the sign-in challenge and a code for tokens.
+#[utoipa::path(
+    post,
+    path = "/api/v1/mfa/verify",
+    tag = "mfa",
+    summary = "Exchange the sign-in challenge for tokens",
+    description = "Accepts a 6-digit TOTP code or a recovery code. Five wrong codes destroy the \
+                   ticket and the password must be entered again.",
+    request_body = MfaVerifyPayload,
+    responses(
+        (status = 200, description = "Signed in", body = Envelope<SignInResult>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 401, description = "Invalid or expired challenge, or a wrong code", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn mfa_verify_handler(
     State(state): State<AppState>,

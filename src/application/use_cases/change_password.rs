@@ -22,7 +22,7 @@ pub struct ChangePasswordCommand {
     pub mfa_code: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ChangePasswordResult {
     pub id: Uuid,
     pub email: String,

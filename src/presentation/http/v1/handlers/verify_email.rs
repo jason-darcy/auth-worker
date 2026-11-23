@@ -13,6 +13,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
@@ -27,12 +28,13 @@ use crate::{
 /// Endpoint the confirmation page posts to.
 pub const VERIFY_EMAIL_FORM_PATH: &str = "/api/v1/verify-email";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct VerifyEmailQuery {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VerifyEmailPayload {
     pub token: String,
 }
@@ -80,6 +82,16 @@ impl TryFrom<VerifyEmailPayload> for VerifyEmailCommand {
 /// The token is **not** consumed here: mail scanners and link previews fetch
 /// every URL in a message, which would burn the token before the recipient
 /// clicks. The page posts to [`VERIFY_EMAIL_FORM_PATH`] instead.
+#[utoipa::path(
+    get,
+    path = "/api/v1/verify-email",
+    tag = "email",
+    summary = "Render the email confirmation page",
+    description = "Does **not** consume the token: mail scanners fetch every link in a message. \
+                   The page posts to `POST /verify-email`.",
+    params(VerifyEmailQuery),
+    responses(        (status = 200, description = "HTML confirmation page", body = String, content_type = "text/html"))
+)]
 #[worker::send]
 pub async fn verify_email_form_handler(ApiQuery(query): ApiQuery<VerifyEmailQuery>) -> Response {
     let token = query.token.unwrap_or_default();
@@ -122,6 +134,18 @@ document.getElementById("verify").addEventListener("submit", async (event) => {{
     document("Verify email", &body)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/verify-email",
+    tag = "email",
+    summary = "Verify an email address with a token",
+    request_body = VerifyEmailPayload,
+    responses(
+        (status = 200, description = "Email verified", body = Envelope<VerifyEmailResult>),
+        (status = 400, description = "Invalid or expired token", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn verify_email_handler(
     State(state): State<AppState>,

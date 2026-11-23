@@ -10,12 +10,15 @@ use crate::{
 };
 
 /// One session as returned by `GET /sessions`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SessionResult {
     /// Refresh token family id; also the path segment of `DELETE /sessions/{id}`.
     pub id: String,
+    #[schema(value_type = String, format = DateTime)]
     pub created_at: Timestamp,
+    #[schema(value_type = String, format = DateTime)]
     pub expires_at: Timestamp,
+    #[schema(value_type = Option<String>, format = DateTime)]
     pub last_used_at: Option<Timestamp>,
     pub user_agent: Option<String>,
     pub ip: Option<String>,

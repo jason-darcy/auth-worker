@@ -23,7 +23,7 @@ pub struct ResetPasswordCommand {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ResetPasswordResult {
     pub id: Uuid,
     pub email: String,

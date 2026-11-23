@@ -14,6 +14,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
@@ -23,7 +24,7 @@ use crate::{
 
 use crate::presentation::utils::validation::is_valid_email;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignInPayload {
     pub email: String,
     pub password: String,
@@ -78,6 +79,24 @@ impl TryFrom<SignInPayload> for SignInCommand {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/signin",
+    tag = "session",
+    summary = "Exchange credentials for an access and refresh token pair",
+    description = "Opens a new session. When MFA is enabled the response carries \
+                   `mfa_required: true` and a `challenge_token` instead of tokens; finish with \
+                   `POST /mfa/verify`. The account is locked for 15 minutes after 10 consecutive \
+                   failures.",
+    request_body = SignInPayload,
+    responses(
+        (status = 200, description = "Signed in, or a second factor is required", body = Envelope<SignInOutcome>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 401, description = "Invalid credentials", body = Envelope<Vec<String>>),
+        (status = 403, description = "The email is not verified", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn signin_handler(
     State(state): State<AppState>,

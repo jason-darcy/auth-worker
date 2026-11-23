@@ -21,7 +21,7 @@ pub struct RefreshTokensCommand {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RefreshTokensResult {
     pub id: Uuid,
     pub email: String,

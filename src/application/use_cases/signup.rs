@@ -30,11 +30,12 @@ pub struct SignUpCommand {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SignUpResult {
     pub id: Uuid,
     pub name: String,
     pub email: String,
+    #[schema(value_type = String, format = DateTime)]
     pub created_at: Timestamp,
 }
 

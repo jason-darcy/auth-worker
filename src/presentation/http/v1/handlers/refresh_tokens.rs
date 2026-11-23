@@ -13,6 +13,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING},
@@ -20,7 +21,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RefreshTokensPayload {
     pub refresh_token: String,
 }
@@ -65,6 +66,22 @@ impl TryFrom<RefreshTokensPayload> for RefreshTokensCommand {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/refresh",
+    tag = "session",
+    summary = "Rotate a refresh token for a new token pair",
+    description = "The presented token is retired. Presenting an already rotated token is treated \
+                   as a replay and revokes the whole session.",
+    request_body = RefreshTokensPayload,
+    responses(
+        (status = 200, description = "New token pair", body = Envelope<RefreshTokensResult>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 401, description = "Unknown, expired or replayed token", body = Envelope<Vec<String>>),
+        (status = 403, description = "The email is not verified", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn refresh_tokens_handler(
     State(state): State<AppState>,

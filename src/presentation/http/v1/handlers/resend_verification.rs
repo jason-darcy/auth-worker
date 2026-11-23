@@ -16,6 +16,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::{EmptyResult, Envelope},
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING, EMAIL_BINDING},
@@ -27,7 +28,7 @@ use crate::{
 pub const RESEND_VERIFICATION_MESSAGE: &str =
     "if the email is registered and unverified, a new verification link has been sent";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ResendVerificationPayload {
     pub email: String,
 }
@@ -65,6 +66,20 @@ impl TryFrom<ResendVerificationPayload> for ResendVerificationCommand {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/resend-verification",
+    tag = "email",
+    summary = "Email a new verification link",
+    description = "The response is identical for unknown and already verified emails. At most \
+                   one email per account per minute.",
+    request_body = ResendVerificationPayload,
+    responses(
+        (status = 200, description = "Link sent when the account exists and is unverified", body = Envelope<EmptyResult>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn resend_verification_handler(
     State(state): State<AppState>,

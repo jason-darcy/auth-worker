@@ -12,6 +12,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         middlewares::auth::AuthenticatedAccount,
@@ -19,12 +20,13 @@ use crate::{
     },
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AccountResult {
     pub id: Uuid,
     pub name: String,
     pub email: String,
     pub is_verified: bool,
+    #[schema(value_type = String, format = DateTime)]
     pub created_at: Timestamp,
 }
 
@@ -86,6 +88,19 @@ async fn load_account(state: &AppState, id: Uuid) -> ApiResult<AccountResult> {
 }
 
 /// `GET /account/me` — the account behind the presented access token.
+#[utoipa::path(
+    get,
+    path = "/api/v1/account/me",
+    tag = "account",
+    summary = "The caller's account",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Account", body = Envelope<AccountResult>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>),
+        (status = 404, description = "The account no longer exists", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn me_handler(
     State(state): State<AppState>,
@@ -96,6 +111,22 @@ pub async fn me_handler(
     Ok(ApiResponse::ok(200, Vec::new(), Vec::new(), account))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/account/{account_id}",
+    tag = "account",
+    summary = "A single account (self only)",
+    params(("account_id" = String, Path, description = "Account id; must be the caller's own")),
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "Account", body = Envelope<AccountResult>),
+        (status = 400, description = "Malformed account id", body = Envelope<Vec<String>>),
+        (status = 401, description = "Missing or invalid access token", body = Envelope<Vec<String>>),
+        (status = 403, description = "The id is not the caller's", body = Envelope<Vec<String>>),
+        (status = 404, description = "The account no longer exists", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn get_account_handler(
     State(state): State<AppState>,

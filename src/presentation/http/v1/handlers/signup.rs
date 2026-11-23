@@ -14,6 +14,7 @@ use crate::{
                 ApiError::{self, BadRequest},
                 ApiResult,
             },
+            openapi::Envelope,
             response::ApiResponse,
         },
         state::{AppState, D1_BINDING, EMAIL_BINDING},
@@ -23,7 +24,7 @@ use crate::{
 
 use crate::presentation::utils::validation::{is_valid_email, PASSWORD_MAX_LEN, PASSWORD_MIN_LEN};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignUpPayload {
     pub name: String,
     pub email: String,
@@ -99,6 +100,20 @@ impl TryFrom<SignUpPayload> for SignUpCommand {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/signup",
+    tag = "registration",
+    summary = "Create an account and email a verification link",
+    description = "The verification email is best-effort: a failure to send it does not fail the signup.",
+    request_body = SignUpPayload,
+    responses(
+        (status = 200, description = "Account created", body = Envelope<SignUpResult>),
+        (status = 400, description = "Invalid payload", body = Envelope<Vec<String>>),
+        (status = 409, description = "The email is already registered", body = Envelope<Vec<String>>),
+        (status = 429, description = "Rate limit exceeded", body = Envelope<Vec<String>>)
+    )
+)]
 #[worker::send]
 pub async fn signup_handler(
     State(state): State<AppState>,
