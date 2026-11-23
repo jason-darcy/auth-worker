@@ -19,8 +19,10 @@ export default defineConfig(() => {
       compatibilityDate: "2026-11-18",
       entrypoint: "build/index.js",
       // Hourly maintenance: delete expired verification, reset and refresh
-      // tokens (see the `scheduled` handler in src/lib.rs).
-      triggers: { crons: ["0 * * * *"] },
+      // tokens plus expired MFA challenges (see the `scheduled` handler in
+      // src/lib.rs). `cf` takes triggers as a typed array, not wrangler's
+      // `{ crons: [...] }` shape.
+      triggers: [{ type: "scheduled", schedule: "0 * * * *" }],
       ...(domain ? { domains: [domain] } : {}),
       observability: {
         "enabled": true,

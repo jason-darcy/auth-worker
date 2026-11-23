@@ -140,8 +140,6 @@ pub async fn signin_handler(
 
 #[cfg(test)]
 mod tests {
-    use crate::application::use_cases::signin::SignInResult;
-
     use super::*;
 
     fn payload(email: &str, password: &str) -> SignInPayload {
