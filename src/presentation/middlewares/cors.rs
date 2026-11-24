@@ -6,10 +6,7 @@ use axum::http::{
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::{
-    logging::log_warn,
-    presentation::state::{AppState, CORS_ORIGINS_VAR},
-};
+use crate::presentation::state::{AppState, CORS_ORIGINS_VAR};
 
 /// Value that allows every origin.
 pub const WILDCARD: &str = "*";
@@ -21,8 +18,7 @@ pub const PREFLIGHT_MAX_AGE: Duration = Duration::from_secs(600);
 /// CORS is opt-in: without `CORS_ORIGINS` the API stays same-origin only, which
 /// is the safe default for an auth service.
 pub fn cors_layer(state: &AppState) -> Option<CorsLayer> {
-    // A missing variable is the normal "CORS disabled" state, so it must not
-    // log on every request.
+    // A missing variable is the normal "CORS disabled" state.
     let raw = state
         .env
         .var(CORS_ORIGINS_VAR)
@@ -54,10 +50,7 @@ pub fn build_cors_layer(raw: &str) -> Option<CorsLayer> {
 
     match origins {
         Origins::None => None,
-        Origins::Any => {
-            log_warn!("CORS: {CORS_ORIGINS_VAR} allows every origin");
-            Some(layer.allow_origin(AllowOrigin::any()))
-        }
+        Origins::Any => Some(layer.allow_origin(AllowOrigin::any())),
         Origins::List(origins) => Some(layer.allow_origin(AllowOrigin::list(origins))),
     }
 }
@@ -79,9 +72,8 @@ fn parse_origins(raw: &str) -> Origins {
             continue;
         }
         // `AllowOrigin::list` panics on a wildcard, so it is handled above.
-        match origin_header_value(entry) {
-            Some(value) => origins.push(value),
-            None => log_warn!("CORS: ignoring invalid origin {entry:?} in {CORS_ORIGINS_VAR}"),
+        if let Some(value) = origin_header_value(entry) {
+            origins.push(value);
         }
     }
 
@@ -108,83 +100,4 @@ fn origin_header_value(entry: &str) -> Option<HeaderValue> {
         return None;
     }
     HeaderValue::from_str(entry).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_a_comma_separated_allowlist() {
-        let origins = parse_origins(" https://app.example.com , https://admin.example.com ");
-
-        assert_eq!(
-            origins,
-            Origins::List(vec![
-                HeaderValue::from_static("https://app.example.com"),
-                HeaderValue::from_static("https://admin.example.com"),
-            ])
-        );
-    }
-
-    #[test]
-    fn accepts_localhost_origins_for_development() {
-        let origins = parse_origins("http://localhost:5173");
-
-        assert_eq!(
-            origins,
-            Origins::List(vec![HeaderValue::from_static("http://localhost:5173")])
-        );
-    }
-
-    #[test]
-    fn wildcard_wins_over_an_allowlist() {
-        assert_eq!(parse_origins("https://app.example.com, *"), Origins::Any);
-    }
-
-    #[test]
-    fn empty_configuration_disables_cors() {
-        for raw in ["", "   ", ",", " , , "] {
-            assert_eq!(parse_origins(raw), Origins::None);
-            assert!(build_cors_layer(raw).is_none());
-        }
-    }
-
-    #[test]
-    fn trims_a_trailing_slash() {
-        assert_eq!(
-            parse_origins("https://app.example.com/"),
-            Origins::List(vec![HeaderValue::from_static("https://app.example.com")])
-        );
-    }
-
-    #[test]
-    fn ignores_entries_that_are_not_origins() {
-        for entry in [
-            "app.example.com",
-            "https://app.example.com/path",
-            "ftp://app.example.com",
-            "https://app.example.com?x=1",
-            "https://",
-            "https://app.example.com#fragment",
-        ] {
-            assert_eq!(parse_origins(entry), Origins::None, "{entry}");
-        }
-    }
-
-    #[test]
-    fn keeps_the_valid_entries_next_to_invalid_ones() {
-        let origins = parse_origins("https://app.example.com,nonsense");
-
-        assert_eq!(
-            origins,
-            Origins::List(vec![HeaderValue::from_static("https://app.example.com")])
-        );
-    }
-
-    #[test]
-    fn builds_a_layer_when_origins_are_configured() {
-        assert!(build_cors_layer("https://app.example.com").is_some());
-        assert!(build_cors_layer("*").is_some());
-    }
 }

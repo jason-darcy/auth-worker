@@ -14,8 +14,11 @@ codegen-units = 1
 [dependencies]
 worker = { version = "0.9", features = ['http', 'axum', 'd1'] }
 worker-macros = { version = "0.9", features = ['http'] }
-axum = { version = "0.8", default-features = false, features = ['json', 'query'] }
-tower-http = { version = "0.6.11", features = ['cors'] }
+axum = { version = "0.8", default-features = false, features = [
+  'json',
+  'query',
+] }
+tower-http = { version = "0.7.1", features = ['cors'] }
 tower-service = { version = "0.3.3" }
 async-trait = { version = "0.1.92" }
 serde = { version = "1.0.229", features = ['derive'] }
@@ -24,18 +27,3 @@ argon2 = { version = "0.6.0" } # argon2 need getrandom features['wasm_js'], or i
 snafu = { version = "0.9.2" }
 uuid = { version = "1.29.3", features = ['serde', 'v7', 'js'] }
 jiff = { version = "1.0.1", features = ['serde', 'js'] }
-sha2 = { version = "0.10.9" }
-# TOTP (RFC 6238) and at-rest encryption of the TOTP secrets.
-hmac = { version = "0.12.1" }
-sha1 = { version = "0.10.7" }
-aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
-data-encoding = { version = "2.11.1" }
-jsonwebtoken = { version = "12.0.0", default-features = false, features = ["rust_crypto"] }
-# OpenAPI document generated from the Rust types, plus the Swagger UI it serves.
-# `vendored` keeps the UI assets inside the crate so a build never has to reach
-# GitHub (utoipa-swagger-ui downloads them by default).
-utoipa = { version = "6.0.0", features = ["uuid"] }
-utoipa-swagger-ui = { version = "10.0.2", features = ["axum", "vendored"] }
-
-[dev-dependencies]
-serde_json = "1.0.145"

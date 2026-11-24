@@ -19,6 +19,4 @@ fmt:
 
 check:
     cargo fmt --all -- --check
-    # `--all-targets` matters: without it the `#[cfg(test)]` modules are not
-    # linted at all.
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
